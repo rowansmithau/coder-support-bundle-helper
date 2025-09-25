@@ -28,11 +28,8 @@ function renderProfile(p) {
   // Keep href for copyability, but prevent default so current tab doesn't navigate.
   const pprofLink = el.querySelector('.pprof');
   pprofLink.href = `/pprof/${p.id}/ui`;
-  pprofLink.addEventListener('click', (e) => {
-    e.preventDefault();
-    // Open exactly one new tab/window; avoid reusing the current page.
-    window.open(pprofLink.href, '_blank', 'noopener,noreferrer');
-  });
+  pprofLink.target = "_blank";
+  pprofLink.rel = "noopener noreferrer";
 
 
   el.querySelector('.show-top').addEventListener('click', async () => {
