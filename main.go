@@ -430,7 +430,7 @@ func (s *Store) ensurePprofTarget(id string) (*url.URL, error) {
 	}
 	_ = tf.Close()
 
-	// Pick a free local port ourselves (avoid :0 ambiguity).
+	// Pick a free local port ourselves.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		_ = os.Remove(tf.Name())
@@ -442,26 +442,22 @@ func (s *Store) ensurePprofTarget(id string) (*url.URL, error) {
 	targetStr := fmt.Sprintf("http://127.0.0.1:%d", port)
 	targetURL, _ := url.Parse(targetStr)
 
-	// Launch: try "go tool pprof" first, fallback to "pprof" if needed.
+	// Launch pprof: use ONLY "go tool pprof" and force "no browser".
 	ctx, cancel := context.WithCancel(context.Background())
-	start := func(cmdName string, args ...string) (*exec.Cmd, error) {
-		cmd := exec.CommandContext(ctx, cmdName, args...)
-		// Inherit minimal env; nothing special required.
-		if err := cmd.Start(); err != nil {
-			return nil, err
-		}
-		return cmd, nil
-	}
-
-	var cmd *exec.Cmd
-	cmd, err = start("go", "tool", "pprof", "-http="+fmt.Sprintf("127.0.0.1:%d", port), tf.Name())
-	if err != nil {
-		cmd, err = start("pprof", "-http="+fmt.Sprintf("127.0.0.1:%d", port), tf.Name())
-		if err != nil {
-			cancel()
-			_ = os.Remove(tf.Name())
-			return nil, fmt.Errorf("start pprof: %w", err)
-		}
+	cmd := exec.CommandContext(ctx, "go", "tool", "pprof",
+		"-no_browser",
+		"-http="+fmt.Sprintf("127.0.0.1:%d", port),
+		tf.Name(),
+	)
+	// Prevent pprof from auto-opening the browser (belt & suspenders).
+	cmd.Env = append(os.Environ(),
+		"PPROF_NO_BROWSER=1",
+		"BROWSER=none",
+	)
+	if err := cmd.Start(); err != nil {
+		cancel()
+		_ = os.Remove(tf.Name())
+		return nil, fmt.Errorf("start pprof: %w", err)
 	}
 
 	// Wait for the server to accept connections.
@@ -514,6 +510,11 @@ func main() {
 	if strings.TrimSpace(*bundlePath) == "" {
 		log.Fatalf("missing -bundle=PATH.zip (required)")
 	}
+	// Require Graphviz 'dot' so pprof Graph view works.
+	if _, err := exec.LookPath("dot"); err != nil {
+		log.Fatalf("Graphviz 'dot' not found in PATH.\nInstall it and try again:\n  macOS:  brew install graphviz\n  Debian/Ubuntu:  sudo apt-get install graphviz\n  Fedora/RHEL:    sudo dnf install graphviz")
+	}
+
 	fi, err := os.Stat(*bundlePath)
 	if err != nil {
 		log.Fatalf("bundle: %v", err)
@@ -622,7 +623,11 @@ func main() {
 	})
 
 	log.Printf("Loaded bundle %q with %d profiles. Native pprof UI mounted at /pprof/{profileID}/", b.Name, len(b.Profiles))
-	log.Printf("Listening on %s", *addr)
+	listenURL := *addr
+	if !strings.HasPrefix(listenURL, "http://") && !strings.HasPrefix(listenURL, "https://") {
+		listenURL = "http://" + listenURL
+	}
+	log.Printf("Listening on %s", listenURL)
 	log.Fatal(http.ListenAndServe(*addr, withCORS(r)))
 }
 
