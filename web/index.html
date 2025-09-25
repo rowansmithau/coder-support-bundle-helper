@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Coder Support Bundle Viewer</title>
+  <link rel="stylesheet" href="/style.css"/>
+</head>
+<body>
+<header>
+  <h1>Coder Support Bundle Viewer</h1>
+</header>
+
+<section id="bundles"></section>
+
+<template id="bundle-tpl">
+  <div class="bundle">
+    <h2></h2>
+    <div class="meta"></div>
+    <div class="profiles"></div>
+  </div>
+</template>
+
+<template id="profile-tpl">
+  <div class="profile">
+    <div class="row header">
+      <div class="title"></div>
+      <div class="tags"></div>
+    </div>
+    <div class="row">
+      <div class="summary"></div>
+      <div class="actions">
+        <button class="show-top">Top</button>
+        <button class="show-flame">Flame</button>
+        <a class="pprof">Open pprof UI</a>
+        <a class="download" target="_blank">Download</a>
+      </div>
+    </div>
+    <div class="panel top hidden">
+      <table class="top-table">
+        <thead><tr><th>Function</th><th>File</th><th>Flat</th><th>Flat%</th><th>Cum</th><th>Cum%</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="panel flame hidden">
+      <canvas class="flamecanvas" width="1400" height="400"></canvas>
+    </div>
+  </div>
+</template>
+
+<script src="/app.js"></script>
+</body>
+</html>
