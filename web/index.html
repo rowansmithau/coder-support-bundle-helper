@@ -9,9 +9,70 @@
 <body>
 <header>
   <h1>Coder Support Bundle Viewer</h1>
+  <div class="header-actions">
+    <button id="timeseries-btn" class="timeseries-btn" style="display:none">Time Series Analysis</button>
+    <button id="upload-btn" class="upload-btn">Upload Bundle</button>
+    <input type="file" id="upload-input" accept=".zip" style="display: none;">
+  </div>
 </header>
 
+<!-- Bundle Metadata Panel -->
+<section id="metadata-panel" class="metadata-panel hidden">
+  <h3>Bundle Information</h3>
+  <div class="metadata-grid">
+    <div class="metadata-item deployment">
+      <span class="metadata-label">Deployment ID:</span>
+      <span id="deployment-id" class="metadata-value">—</span>
+    </div>
+    <div class="metadata-item">
+      <span class="metadata-label">Version:</span>
+      <span id="version" class="metadata-value">—</span>
+    </div>
+    <div class="metadata-item">
+      <span class="metadata-label">Dashboard URL:</span>
+      <span id="dashboard-url" class="metadata-value">—</span>
+    </div>
+    <div class="metadata-item">
+      <span class="metadata-label">License Status:</span>
+      <span id="license-status" class="metadata-value">—</span>
+    </div>
+  </div>
+  <div id="license-details" class="license-details hidden">
+    <div class="license-alert" id="license-alert"></div>
+    <details class="license-data">
+      <summary>View Deployment Details</summary>
+      <div id="license-json" class="license-sections"></div>
+    </details>
+  </div>
+</section>
+
+<!-- Comparison Panel -->
+<section id="comparison-panel" class="comparison-panel hidden">
+  <div class="comparison-header">
+    <h3>Profile Comparison</h3>
+    <div id="selected-profiles-list"></div>
+    <button id="compare-btn" class="compare-btn" disabled>Select 2 profiles to compare</button>
+  </div>
+</section>
+
 <section id="bundles"></section>
+
+<!-- Comparison Modal -->
+<div id="comparison-modal" class="modal hidden">
+  <div class="modal-content">
+    <button id="close-modal" class="close-modal">&times;</button>
+    <div id="comparison-results"></div>
+  </div>
+</div>
+
+<!-- Time Series Modal -->
+<div id="timeseries-modal" class="modal hidden">
+  <div class="modal-content">
+    <button id="close-timeseries" class="close-modal">&times;</button>
+    <h3>Time Series Analysis</h3>
+    <div id="timeseries-content"></div>
+  </div>
+</div>
 
 <template id="bundle-tpl">
   <div class="bundle">
@@ -24,16 +85,28 @@
 <template id="profile-tpl">
   <div class="profile">
     <div class="row header">
-      <div class="title"></div>
-      <div class="tags"></div>
+      <div class="profile-info">
+        <input type="checkbox" class="compare-checkbox">
+        <div class="title"></div>
+        <div class="tags"></div>
+      </div>
     </div>
     <div class="row">
       <div class="summary"></div>
       <div class="actions">
         <button class="show-top">Top</button>
         <button class="show-flame">Flame</button>
+        <button class="show-search">Search</button>
         <a class="pprof">Open pprof UI</a>
-        <a class="download" target="_blank">Download</a>
+        <div class="dropdown">
+          <button class="dropdown-btn">Export ▼</button>
+          <div class="dropdown-content">
+            <a class="export-csv">Export as CSV</a>
+            <a class="export-json">Export as JSON</a>
+            <a class="export-raw">Export Raw</a>
+          </div>
+        </div>
+        <a class="download" target="_blank" style="display:none">Download</a>
       </div>
     </div>
     <div class="panel top hidden">
@@ -45,6 +118,7 @@
     <div class="panel flame hidden">
       <canvas class="flamecanvas" width="1400" height="400"></canvas>
     </div>
+    <div class="panel search hidden"></div>
   </div>
 </template>
 
