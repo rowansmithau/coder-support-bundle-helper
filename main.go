@@ -45,6 +45,7 @@ const (
 	maxConcurrentOps  = 10
 	pprofTimeout      = 30 * time.Minute
 	defaultListenAddr = "127.0.0.1:6969"
+	maxGzipLayers     = 5
 )
 
 // Metrics
@@ -114,6 +115,14 @@ type BundleMetadata struct {
 	BuildInfoMismatch string          `json:"buildInfoMismatch,omitempty"`
 	Version           string          `json:"version,omitempty"`
 	DashboardURL      string          `json:"dashboardUrl,omitempty"`
+	HealthStatus      *HealthStatus   `json:"healthStatus,omitempty"`
+}
+
+type HealthStatus struct {
+	Healthy   bool       `json:"healthy"`
+	Severity  string     `json:"severity"`
+	Warnings  []string   `json:"warnings,omitempty"`
+	Timestamp *time.Time `json:"timestamp,omitempty"`
 }
 
 type LoadResult struct {
@@ -157,6 +166,12 @@ func NewStore(logger *slog.Logger) *Store {
 func (s *Store) AddBundle(b *Bundle) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if existing, ok := s.bundles[b.ID]; ok {
+		for _, p := range existing.Profiles {
+			delete(s.profiles, p.ID)
+		}
+	}
 	s.bundles[b.ID] = b
 	for _, p := range b.Profiles {
 		p.BundleID = b.ID
@@ -321,6 +336,9 @@ func detectAndDecompressAll(data []byte) ([]byte, int, error) {
 	layers := 0
 	out := data
 	for len(out) >= 2 && out[0] == 0x1f && out[1] == 0x8b {
+		if layers >= maxGzipLayers {
+			return nil, layers, fmt.Errorf("too many gzip layers (>%d)", maxGzipLayers)
+		}
 		gr, err := gzip.NewReader(bytes.NewReader(out))
 		if err != nil {
 			return nil, layers, err
@@ -329,6 +347,9 @@ func detectAndDecompressAll(data []byte) ([]byte, int, error) {
 		_ = gr.Close()
 		if err != nil {
 			return nil, layers, err
+		}
+		if len(dec) > maxProfileSize {
+			return nil, layers, fmt.Errorf("decompressed data exceeds max profile size (%d bytes)", maxProfileSize)
 		}
 		out = dec
 		layers++
@@ -344,6 +365,9 @@ func parseProfile(name string, data []byte) (*profile.Profile, error) {
 	buf, _, err := detectAndDecompressAll(data)
 	if err != nil {
 		return nil, fmt.Errorf("decompress %s: %w", name, err)
+	}
+	if len(buf) > maxProfileSize {
+		return nil, fmt.Errorf("profile %s too large after decompression: %d bytes (max: %d)", name, len(buf), maxProfileSize)
 	}
 	p, err := profile.Parse(bytes.NewReader(buf))
 	if err != nil {
@@ -398,17 +422,20 @@ func loadBundleFromZip(r io.ReaderAt, size int64, filename string) *LoadResult {
 		return result
 	}
 
+	now := time.Now().UTC()
 	b := &Bundle{
-		ID:       makeID(filepath.Base(filename), time.Now().Format("20060102150405")),
+		ID:       makeID(filepath.Base(filename), fmt.Sprintf("%d", now.UnixNano())),
 		Name:     filepath.Base(filename),
-		Created:  time.Now(),
+		Created:  now,
 		Path:     filename,
 		Warnings: []string{},
 		Metadata: &BundleMetadata{},
 	}
 
 	// Parse metadata files
-	parseBundleMetadata(zr, b.Metadata, &result.Warnings)
+	if captured := parseBundleMetadata(zr, b.Metadata, &result.Warnings); captured != nil {
+		b.Created = *captured
+	}
 
 	var profs []*StoredProfile
 	for _, f := range zr.File {
@@ -475,20 +502,21 @@ func loadBundleFromZip(r io.ReaderAt, size int64, filename string) *LoadResult {
 	}
 
 	if len(profs) == 0 {
-		result.Error = errors.New("no pprof profiles found under pprof/ in the zip")
-		return result
+		result.Warnings = append(result.Warnings, "No pprof profiles found under pprof/ in the zip")
+		b.Profiles = []*StoredProfile{}
+	} else {
+		sort.Slice(profs, func(i, j int) bool { return profs[i].Name < profs[j].Name })
+		b.Profiles = profs
 	}
-
-	sort.Slice(profs, func(i, j int) bool { return profs[i].Name < profs[j].Name })
-	b.Profiles = profs
 	b.Warnings = result.Warnings
 	result.Bundle = b
 
 	return result
 }
 
-func parseBundleMetadata(zr *zip.Reader, metadata *BundleMetadata, warnings *[]string) {
+func parseBundleMetadata(zr *zip.Reader, metadata *BundleMetadata, warnings *[]string) *time.Time {
 	var buildInfoRaw []byte
+	var capturedAt *time.Time
 	// Parse deployment/buildinfo.json
 	if buildinfoFile := findSibling(zr, "deployment/buildinfo.json"); buildinfoFile != nil {
 		if rc, err := buildinfoFile.Open(); err == nil {
@@ -727,6 +755,139 @@ func parseBundleMetadata(zr *zip.Reader, metadata *BundleMetadata, warnings *[]s
 				}
 			}
 			_ = rc.Close()
+		}
+	}
+
+	if healthFile := findSibling(zr, "deployment/health.json"); healthFile != nil {
+		if rc, err := healthFile.Open(); err == nil {
+			if content, err := io.ReadAll(rc); err == nil {
+				status, err := parseHealthReport(content)
+				if err != nil {
+					*warnings = append(*warnings, fmt.Sprintf("deployment/health.json is not valid JSON: %v", err))
+				} else if status != nil {
+					metadata.HealthStatus = status
+					if ts := status.Timestamp; ts != nil {
+						utc := ts.UTC()
+						status.Timestamp = &utc
+						capturedAt = status.Timestamp
+					}
+					if !status.Healthy && status.Severity != "" {
+						*warnings = append(*warnings, fmt.Sprintf("Health severity reported as %s", status.Severity))
+					}
+					if len(status.Warnings) > 0 {
+						*warnings = append(*warnings, fmt.Sprintf("Health warnings detected (%d)", len(status.Warnings)))
+					}
+				}
+			}
+			_ = rc.Close()
+		}
+	}
+
+	if capturedAt == nil {
+		for _, f := range zr.File {
+			if !strings.HasSuffix(f.Name, "cli_logs.txt") {
+				continue
+			}
+			rc, err := f.Open()
+			if err != nil {
+				continue
+			}
+			content, err := io.ReadAll(rc)
+			_ = rc.Close()
+			if err != nil {
+				continue
+			}
+			lines := strings.Split(string(content), "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if len(line) < len("2006-01-02 15:04:05.000") {
+					continue
+				}
+				parts := strings.Fields(line)
+				if len(parts) < 2 {
+					continue
+				}
+				ts := parts[0] + " " + parts[1]
+				t, err := time.ParseInLocation("2006-01-02 15:04:05.000", ts, time.UTC)
+				if err != nil {
+					continue
+				}
+				capturedAt = &t
+				break
+			}
+			if capturedAt != nil {
+				break
+			}
+		}
+	}
+
+	return capturedAt
+}
+
+func parseHealthReport(content []byte) (*HealthStatus, error) {
+	var base struct {
+		Time     string `json:"time"`
+		Healthy  bool   `json:"healthy"`
+		Severity string `json:"severity"`
+	}
+	if err := json.Unmarshal(content, &base); err != nil {
+		return nil, err
+	}
+
+	var raw any
+	if err := json.Unmarshal(content, &raw); err != nil {
+		return nil, err
+	}
+
+	seen := map[string]struct{}{}
+	collectWarnings(raw, seen)
+
+	warnings := make([]string, 0, len(seen))
+	for w := range seen {
+		warnings = append(warnings, w)
+	}
+	sort.Strings(warnings)
+	if len(warnings) == 0 {
+		warnings = nil
+	}
+
+	status := &HealthStatus{
+		Healthy:  base.Healthy,
+		Severity: strings.ToLower(base.Severity),
+		Warnings: warnings,
+	}
+
+	if base.Time != "" {
+		if t, err := time.Parse(time.RFC3339Nano, base.Time); err == nil {
+			status.Timestamp = &t
+		}
+	}
+
+	return status, nil
+}
+
+func collectWarnings(value any, seen map[string]struct{}) {
+	switch v := value.(type) {
+	case map[string]any:
+		for key, child := range v {
+			if key == "warnings" {
+				switch arr := child.(type) {
+				case []any:
+					for _, item := range arr {
+						if s, ok := item.(string); ok {
+							s = strings.TrimSpace(s)
+							if s != "" {
+								seen[s] = struct{}{}
+							}
+						}
+					}
+				}
+			}
+			collectWarnings(child, seen)
+		}
+	case []any:
+		for _, item := range v {
+			collectWarnings(item, seen)
 		}
 	}
 }
@@ -1573,11 +1734,22 @@ func handleUploadBundle(s *Store) http.HandlerFunc {
 			http.Error(w, "failed to create temp file", http.StatusInternalServerError)
 			return
 		}
+		defer tf.Close()
 		defer os.Remove(tf.Name())
 
 		// Copy upload to temp file
 		if _, err := io.Copy(tf, file); err != nil {
 			http.Error(w, "failed to save upload", http.StatusInternalServerError)
+			return
+		}
+
+		fi, err := tf.Stat()
+		if err != nil {
+			http.Error(w, "failed to inspect upload", http.StatusInternalServerError)
+			return
+		}
+		if fi.Size() > maxBundleSize {
+			http.Error(w, fmt.Sprintf("bundle too large: %d bytes (max: %d)", fi.Size(), maxBundleSize), http.StatusRequestEntityTooLarge)
 			return
 		}
 
@@ -1587,7 +1759,6 @@ func handleUploadBundle(s *Store) http.HandlerFunc {
 			return
 		}
 
-		fi, _ := tf.Stat()
 		result := loadBundleFromZip(tf, fi.Size(), header.Filename)
 
 		if result.Error != nil {

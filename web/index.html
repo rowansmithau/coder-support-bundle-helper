@@ -46,6 +46,16 @@
   </div>
 </section>
 
+<!-- Health Panel -->
+<section id="health-panel" class="health-panel hidden">
+  <div class="health-header">
+    <h3>System Health</h3>
+    <div id="health-time" class="health-time"></div>
+  </div>
+  <div id="health-status-badge" class="health-badge"></div>
+  <ul id="health-warnings" class="health-warnings"></ul>
+</section>
+
 <!-- Comparison Panel -->
 <section id="comparison-panel" class="comparison-panel hidden">
   <div class="comparison-header">
@@ -55,7 +65,7 @@
   </div>
 </section>
 
-<section id="bundles"></section>
+<section id="bundles" class="bundles-panel"></section>
 
 <!-- Comparison Modal -->
 <div id="comparison-modal" class="modal hidden">
@@ -75,11 +85,17 @@
 </div>
 
 <template id="bundle-tpl">
-  <div class="bundle">
-    <h2></h2>
-    <div class="meta"></div>
-    <div class="profiles"></div>
-  </div>
+  <section class="bundle-panel">
+    <div class="bundle-header">
+      <h3>Profile Data</h3>
+      <div class="bundle-subtitle"></div>
+    </div>
+    <div class="bundle-meta"></div>
+    <div class="bundle-warnings hidden"></div>
+    <div class="bundle-content">
+      <div class="profiles"></div>
+    </div>
+  </section>
 </template>
 
 <template id="profile-tpl">

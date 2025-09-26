@@ -2,6 +2,27 @@ let allProfiles = [];
 let selectedProfiles = new Set();
 let timeSeriesChart = null;
 let currentBundleMetadata = null;
+let healthPanelOverride;
+
+function escapeHTML(value) {
+  if (value === null || value === undefined) return '';
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function isSafeURL(url) {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url, window.location.origin);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch (err) {
+    return false;
+  }
+}
 
 async function fetchBundles() {
   const res = await fetch('/api/bundles');
@@ -69,9 +90,20 @@ function displayBundleMetadata(bundle) {
   // Display dashboard URL
   const dashboardEl = document.getElementById('dashboard-url');
   if (metadata.dashboardUrl) {
-    dashboardEl.innerHTML = `<a href="${metadata.dashboardUrl}" target="_blank">${metadata.dashboardUrl}</a>`;
+    const urlText = String(metadata.dashboardUrl).trim();
     dashboardEl.className = 'metadata-value';
-    dashboardEl.title = metadata.dashboardUrl;
+    dashboardEl.title = urlText;
+    dashboardEl.textContent = '';
+    if (isSafeURL(urlText)) {
+      const link = document.createElement('a');
+      link.href = urlText;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.textContent = urlText;
+      dashboardEl.appendChild(link);
+    } else {
+      dashboardEl.textContent = urlText || 'Not found';
+    }
   } else {
     dashboardEl.textContent = 'Not found';
     dashboardEl.className = 'metadata-value muted';
@@ -147,13 +179,13 @@ function displayBundleMetadata(bundle) {
     addSection('license-status.txt', metadata.licenseStatusRaw || metadata.licenseStatus, { rawOnly: Boolean(metadata.licenseStatusRaw) });
 
     if (metadata.licenseMismatch) {
-      addInlineStatus(`<span class="alert-icon">⚠️</span> ${metadata.licenseMismatch}`, 'warning');
+      addInlineStatus(`<span class="alert-icon">⚠️</span> ${escapeHTML(metadata.licenseMismatch)}`, 'warning');
     } else if (metadata.licenseMatch) {
       addInlineStatus('<span class="alert-icon">✅</span> License data matches between license-status.txt and tailnet_debug.html', 'success');
     }
 
     if (metadata.buildInfoMismatch) {
-      addInlineStatus(`<span class="alert-icon">⚠️</span> ${metadata.buildInfoMismatch}`, 'warning');
+      addInlineStatus(`<span class="alert-icon">⚠️</span> ${escapeHTML(metadata.buildInfoMismatch)}`, 'warning');
     } else if (metadata.buildInfoMatch) {
       addInlineStatus('<span class="alert-icon">✅</span> tailnet_debug.html trace matches deployment/buildinfo.json', 'success');
     }
@@ -169,26 +201,93 @@ function displayBundleMetadata(bundle) {
     }
   };
   if (alertEl) {
-    const messages = [];
+    alertEl.textContent = '';
+    const warnings = [];
     if (metadata.licenseMismatch) {
-      messages.push(`<span class="alert-icon">⚠️</span> ${metadata.licenseMismatch}`);
+      warnings.push(metadata.licenseMismatch);
     }
     if (metadata.buildInfoMismatch) {
-      messages.push(`<span class="alert-icon">⚠️</span> ${metadata.buildInfoMismatch}`);
+      warnings.push(metadata.buildInfoMismatch);
     }
 
-    if (messages.length > 0) {
+    if (warnings.length > 0) {
       alertEl.className = 'license-alert warning';
-      alertEl.innerHTML = messages.join('<br>');
+      warnings.forEach(msg => {
+        const row = document.createElement('div');
+        const icon = document.createElement('span');
+        icon.className = 'alert-icon';
+        icon.textContent = '⚠️';
+        const text = document.createElement('span');
+        text.textContent = ` ${msg}`;
+        row.append(icon, text);
+        alertEl.appendChild(row);
+      });
     } else {
       alertEl.className = 'license-alert hidden';
-      alertEl.textContent = '';
     }
   }
   if (detailsEl) {
     detailsEl.classList.toggle('hidden', !hasLicenseData);
   }
   renderLicenseSections();
+  renderHealthStatus(metadata.healthStatus);
+}
+
+function renderHealthStatus(status) {
+  const panel = document.getElementById('health-panel');
+  if (!panel) return;
+
+  const badge = document.getElementById('health-status-badge');
+  const timeEl = document.getElementById('health-time');
+  const warningsEl = document.getElementById('health-warnings');
+
+  // run "window.__HEALTH_PANEL_FORCE__ = 'show'" in console to show health data
+  const override = healthPanelOverride;
+  if (override === 'hide') {
+    panel.classList.add('hidden');
+    return;
+  }
+
+  if (!status && override !== 'show') {
+    panel.classList.add('hidden');
+    return;
+  }
+
+  const severity = ((status && status.severity) || '').toLowerCase();
+  const warnings = status?.warnings || [];
+  const shouldShow = override === 'show' || !status?.healthy || severity !== 'ok' || warnings.length > 0;
+  if (!shouldShow) {
+    panel.classList.add('hidden');
+    return;
+  }
+
+  panel.classList.remove('hidden');
+
+  if (timeEl) {
+    timeEl.textContent = status?.timestamp ? `Captured ${new Date(status.timestamp).toLocaleString()}` : '';
+  }
+
+  if (badge) {
+    const normalized = severity === 'warn' ? 'warning' : severity;
+    const severityClass = status?.healthy && override !== 'show' ? 'ok' : (normalized || 'warning');
+    badge.className = `health-badge ${severityClass}`;
+    if (status?.healthy && override !== 'show') {
+      badge.innerHTML = '<span class="alert-icon">✅</span> All systems healthy';
+    } else {
+      const label = normalized ? normalized.charAt(0).toUpperCase() + normalized.slice(1) : 'Issue';
+      badge.innerHTML = `<span class="alert-icon">⚠️</span> Severity: ${label}`;
+    }
+  }
+
+  if (warningsEl) {
+    warningsEl.innerHTML = '';
+    const list = warnings.length > 0 ? warnings : ['No specific warning messages provided.'];
+    list.forEach(msg => {
+      const li = document.createElement('li');
+      li.textContent = msg;
+      warningsEl.appendChild(li);
+    });
+  }
 }
 
 function updateTimeSeriesButton() {
@@ -201,41 +300,57 @@ function updateTimeSeriesButton() {
 function renderBundles(bundles) {
   const container = document.getElementById('bundles');
   container.innerHTML = '';
-  for (const b of bundles) {
-    const el = document.getElementById('bundle-tpl').content.firstElementChild.cloneNode(true);
-    el.querySelector('h2').textContent = b.name + ' — ' + new Date(b.created).toLocaleString();
-    
-    // Add metadata summary
-    let metaText = `${b.profiles.length} profiles`;
-    if (b.metadata && b.metadata.version) {
-      metaText += ` | Version: ${b.metadata.version}`;
-    }
-    el.querySelector('.meta').textContent = metaText;
-    
-    // Show warnings if any (including license warnings)
-    const allWarnings = [...(b.warnings || [])];
-    if (b.metadata && b.metadata.licenseMismatch) {
-      allWarnings.push(b.metadata.licenseMismatch);
-    }
-    if (b.metadata && b.metadata.buildInfoMismatch) {
-      allWarnings.push(b.metadata.buildInfoMismatch);
-    }
-    
-    if (allWarnings.length > 0) {
-      const warnings = document.createElement('div');
-      warnings.className = 'warnings';
-      warnings.innerHTML = `<span class="warning-icon">⚠️</span> ${allWarnings.length} warning(s)`;
-      warnings.title = allWarnings.join('\n');
-      el.querySelector('.meta').appendChild(warnings);
-    }
-    
-    const pwrap = el.querySelector('.profiles');
-    for (const p of b.profiles) {
-      const pEl = renderProfile(p, b.id);
-      pwrap.appendChild(pEl);
-    }
-    container.appendChild(el);
+  const comparisonPanel = document.getElementById('comparison-panel');
+
+  const hasProfiles = bundles.some(b => (b.profiles || []).length > 0);
+  if (!hasProfiles) {
+    if (comparisonPanel) comparisonPanel.classList.add('hidden');
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.innerHTML = '<strong>No pprof data found.</strong><br>Check that your support bundle includes files under <code>pprof/</code>.';
+    container.appendChild(empty);
+    return;
   }
+
+  if (comparisonPanel) {
+    comparisonPanel.classList.remove('hidden');
+  }
+
+  bundles.forEach(bundle => {
+    const el = document.getElementById('bundle-tpl').content.firstElementChild.cloneNode(true);
+    el.querySelector('.bundle-subtitle').textContent = `${bundle.name} — ${new Date(bundle.created).toLocaleString()}`;
+
+    const metaEl = el.querySelector('.bundle-meta');
+    let metaText = `${bundle.profiles.length} profiles`;
+    if (bundle.metadata && bundle.metadata.version) {
+      metaText += ` | Version: ${bundle.metadata.version}`;
+    }
+    metaEl.textContent = metaText;
+
+    const warningsEl = el.querySelector('.bundle-warnings');
+    const warnings = [...(bundle.warnings || [])];
+    if (bundle.metadata && bundle.metadata.licenseMismatch) {
+      warnings.push(bundle.metadata.licenseMismatch);
+    }
+    if (bundle.metadata && bundle.metadata.buildInfoMismatch) {
+      warnings.push(bundle.metadata.buildInfoMismatch);
+    }
+    if (warnings.length > 0) {
+      warningsEl.innerHTML = `<span class="warning-icon">⚠️</span> ${warnings.length} warning(s)`;
+      warningsEl.title = warnings.join('\n');
+      warningsEl.classList.remove('hidden');
+    } else {
+      warningsEl.remove();
+    }
+
+    const profilesWrap = el.querySelector('.profiles');
+    profilesWrap.innerHTML = '';
+    for (const profile of bundle.profiles) {
+      profilesWrap.appendChild(renderProfile(profile, bundle.id));
+    }
+
+    container.appendChild(el);
+  });
 }
 
 function renderProfile(p, bundleId) {
@@ -325,15 +440,18 @@ function updateComparisonPanel() {
     if (profile) {
       const item = document.createElement('div');
       item.className = 'selected-profile-item';
-      item.innerHTML = `
-        <span>${profile.bundleName} / ${profile.name}</span>
-        <button class="remove-btn" data-id="${id}">×</button>
-      `;
-      item.querySelector('.remove-btn').addEventListener('click', () => {
+      const label = document.createElement('span');
+      label.textContent = `${profile.bundleName} / ${profile.name}`;
+      const removeBtn = document.createElement('button');
+      removeBtn.className = 'remove-btn';
+      removeBtn.dataset.id = id;
+      removeBtn.textContent = '×';
+      removeBtn.addEventListener('click', () => {
         selectedProfiles.delete(id);
         document.querySelector(`[data-profile-id="${id}"] .compare-checkbox`).checked = false;
         updateComparisonPanel();
       });
+      item.append(label, removeBtn);
       list.appendChild(item);
     }
   });
@@ -371,10 +489,39 @@ async function compareProfiles() {
 
 function renderComparison(data, flameData) {
   const results = document.getElementById('comparison-results');
-  
+  const profile1 = escapeHTML(data?.profile1 || 'Profile 1');
+  const profile2 = escapeHTML(data?.profile2 || 'Profile 2');
+  const rowHTML = (data?.diff || []).slice(0, 100).map(row => {
+    const changeClass = row.flatDiff > 0 ? 'increased' : row.flatDiff < 0 ? 'decreased' : 'unchanged';
+    const icon = row.flatDiff > 0 ? '▲' : row.flatDiff < 0 ? '▼' : '—';
+    const funcName = row.func || '';
+    const truncatedFunc = truncate(funcName, 60);
+    const title = escapeHTML(funcName);
+    const flat1 = Number.isFinite(row.flat1) ? row.flat1.toLocaleString() : '—';
+    const flat2 = Number.isFinite(row.flat2) ? row.flat2.toLocaleString() : '—';
+    const diffValue = Math.abs(row.flatDiff);
+    const diffDisplay = Number.isFinite(diffValue) ? diffValue.toLocaleString() : '—';
+    const pct = Number.isFinite(row.pctDiff) && row.pctDiff !== 0
+      ? `${row.pctDiff > 0 ? '+' : ''}${row.pctDiff.toFixed(2)}%`
+      : '—';
+    return `
+      <tr class="${changeClass}">
+        <td class="func-name" title="${title}">${escapeHTML(truncatedFunc)}</td>
+        <td class="numeric">${flat1}</td>
+        <td class="numeric">${flat2}</td>
+        <td class="numeric diff">
+          <span class="${changeClass}">
+            ${icon} ${diffDisplay}
+          </span>
+        </td>
+        <td class="numeric">${pct}</td>
+      </tr>
+    `;
+  }).join('');
+
   const html = `
     <div class="comparison-header">
-      <h3>Comparing: ${data.profile1} vs ${data.profile2}</h3>
+      <h3>Comparing: ${profile1} vs ${profile2}</h3>
       <div class="comparison-tabs">
         <button class="tab-btn active" data-tab="table">Table View</button>
         <button class="tab-btn" data-tab="flame">Flame Diff</button>
@@ -399,25 +546,7 @@ function renderComparison(data, flameData) {
             </tr>
           </thead>
           <tbody>
-            ${data.diff.slice(0, 100).map(row => {
-              const changeClass = row.flatDiff > 0 ? 'increased' : row.flatDiff < 0 ? 'decreased' : 'unchanged';
-              const icon = row.flatDiff > 0 ? '▲' : row.flatDiff < 0 ? '▼' : '—';
-              return `
-                <tr class="${changeClass}">
-                  <td class="func-name" title="${row.func}">${truncate(row.func, 60)}</td>
-                  <td class="numeric">${row.flat1.toLocaleString()}</td>
-                  <td class="numeric">${row.flat2.toLocaleString()}</td>
-                  <td class="numeric diff">
-                    <span class="${changeClass}">
-                      ${icon} ${Math.abs(row.flatDiff).toLocaleString()}
-                    </span>
-                  </td>
-                  <td class="numeric">
-                    ${row.pctDiff !== 0 ? `${row.pctDiff > 0 ? '+' : ''}${row.pctDiff.toFixed(2)}%` : '—'}
-                  </td>
-                </tr>
-              `;
-            }).join('')}
+            ${rowHTML}
           </tbody>
         </table>
       </div>
@@ -565,16 +694,23 @@ function drawFlameDiff(canvas, tree, mode = 'diff') {
         tip.style.display = 'block';
         tip.style.left = (e.clientX + 10) + 'px';
         tip.style.top = (e.clientY + 10) + 'px';
-        
-        const content = r.mode === 'diff' 
-          ? `${r.node.name}
-Profile 1: ${r.node.value1}
-Profile 2: ${r.node.value2}
-Diff: ${r.node.diff > 0 ? '+' : ''}${r.node.diff} (${r.node.pctDiff > 0 ? '+' : ''}${r.node.pctDiff.toFixed(1)}%)`
-          : `${r.node.name}
-Value: ${r.mode === 'profile2' ? r.node.value2 : r.node.value1}`;
-        
-        tip.innerHTML = content.replace(/\n/g, '<br>');
+
+        const pct = Number.isFinite(r.node.pctDiff)
+          ? `${r.node.pctDiff > 0 ? '+' : ''}${r.node.pctDiff.toFixed(1)}%`
+          : '—';
+        const lines = r.mode === 'diff'
+          ? [
+              r.node.name ?? '',
+              `Profile 1: ${r.node.value1}`,
+              `Profile 2: ${r.node.value2}`,
+              `Diff: ${(r.node.diff > 0 ? '+' : '') + r.node.diff} (${pct})`
+            ]
+          : [
+              r.node.name ?? '',
+              `Value: ${r.mode === 'profile2' ? r.node.value2 : r.node.value1}`
+            ];
+
+        tip.innerHTML = lines.map(line => escapeHTML(String(line))).join('<br>');
         return;
       }
     }
@@ -798,33 +934,45 @@ async function showSearch(root, pid) {
         results.innerHTML = '<div class="muted">No matching functions found</div>';
         return;
       }
-      
-      results.innerHTML = `
-        <table class="top-table">
-          <thead>
-            <tr>
-              <th>Function</th>
-              <th>File</th>
-              <th>Flat</th>
-              <th>Flat%</th>
-              <th>Cum</th>
-              <th>Cum%</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${rows.slice(0, 100).map(r => `
-              <tr>
-                <td>${r.func}</td>
-                <td>${r.file || ''}</td>
-                <td>${r.flat}</td>
-                <td>${r.flatPct.toFixed(2)}%</td>
-                <td>${r.cum}</td>
-                <td>${r.cumPct.toFixed(2)}%</td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
+
+      const table = document.createElement('table');
+      table.className = 'top-table';
+
+      const thead = document.createElement('thead');
+      thead.innerHTML = `
+        <tr>
+          <th>Function</th>
+          <th>File</th>
+          <th>Flat</th>
+          <th>Flat%</th>
+          <th>Cum</th>
+          <th>Cum%</th>
+        </tr>
       `;
+      table.appendChild(thead);
+
+      const tbody = document.createElement('tbody');
+      rows.slice(0, 100).forEach(row => {
+        const tr = document.createElement('tr');
+        const cells = [
+          row.func ?? '',
+          row.file ?? '',
+          row.flat ?? '',
+          Number.isFinite(row.flatPct) ? `${row.flatPct.toFixed(2)}%` : '',
+          row.cum ?? '',
+          Number.isFinite(row.cumPct) ? `${row.cumPct.toFixed(2)}%` : ''
+        ];
+        cells.forEach(value => {
+          const td = document.createElement('td');
+          td.textContent = String(value);
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+
+      table.appendChild(tbody);
+      results.innerHTML = '';
+      results.appendChild(table);
     };
     
     btn.addEventListener('click', doSearch);
@@ -849,7 +997,19 @@ async function showTop(root, pid) {
   tbody.innerHTML = '';
   for (const r of rows.slice(0, 100)) {
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${r.func}</td><td>${r.file||''}</td><td>${r.flat}</td><td>${r.flatPct.toFixed(2)}%</td><td>${r.cum}</td><td>${r.cumPct.toFixed(2)}%</td>`;
+    const cells = [
+      r.func ?? '',
+      r.file ?? '',
+      r.flat ?? '',
+      Number.isFinite(r.flatPct) ? `${r.flatPct.toFixed(2)}%` : '',
+      r.cum ?? '',
+      Number.isFinite(r.cumPct) ? `${r.cumPct.toFixed(2)}%` : ''
+    ];
+    cells.forEach(value => {
+      const td = document.createElement('td');
+      td.textContent = String(value);
+      tr.appendChild(td);
+    });
     tbody.appendChild(tr);
   }
   panel.classList.remove('hidden');
@@ -964,6 +1124,19 @@ window.loadTimeSeries = loadTimeSeries;
 
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
+  if (typeof window !== 'undefined' && !Object.getOwnPropertyDescriptor(window, '__HEALTH_PANEL_FORCE__')) {
+    Object.defineProperty(window, '__HEALTH_PANEL_FORCE__', {
+      configurable: true,
+      get() {
+        return healthPanelOverride;
+      },
+      set(value) {
+        healthPanelOverride = value;
+        renderHealthStatus(currentBundleMetadata?.healthStatus);
+      }
+    });
+  }
+
   // Setup comparison panel
   document.getElementById('compare-btn').addEventListener('click', compareProfiles);
   document.getElementById('close-modal').addEventListener('click', () => {
