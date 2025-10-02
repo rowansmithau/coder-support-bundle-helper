@@ -20,7 +20,7 @@ A small web app that ingests a Coder support bundle `.zip` (or a raw `.pprof`/`.
 ### With Go
 
 ```bash
-go run . -bundle ../coder-support-1758781680.zip
+$ go run . -bundle ../coder-support-1758781680.zip
 time=2025-09-29T15:56:31.291+10:00 level=INFO msg="bundle added" id=coder-support-1758781680.zip_1759125391267548000 name=coder-support-1758781680.zip profiles=6
 time=2025-09-29T15:56:31.291+10:00 level=INFO msg="loaded bundle" name=coder-support-1758781680.zip profiles=6 warnings=0
 time=2025-09-29T15:56:31.291+10:00 level=INFO msg="starting server" url=http://127.0.0.1:6969 bundles=1
