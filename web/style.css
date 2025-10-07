@@ -27,7 +27,10 @@ h1{ font-size: 22px; margin:0 0 4px 0;}
   display: flex;
   gap: 12px;
 }
-.upload-btn, .timeseries-btn{
+.upload-btn,
+.timeseries-btn,
+.prometheus-btn,
+.grafana-btn{
   background: var(--accent2);
   color: #020409;
   border: 0;
@@ -35,11 +38,23 @@ h1{ font-size: 22px; margin:0 0 4px 0;}
   padding: 8px 16px;
   cursor: pointer;
   font-weight: 600;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
-.timeseries-btn{
+.timeseries-btn,
+.prometheus-btn{
   background: var(--accent);
 }
-.upload-btn:hover, .timeseries-btn:hover{ 
+.grafana-btn{
+  background: #f05a28;
+  color: #020409;
+}
+.upload-btn:hover,
+.timeseries-btn:hover,
+.prometheus-btn:hover,
+.grafana-btn:hover{ 
   filter: brightness(1.1);
 }
 .upload-btn:disabled{

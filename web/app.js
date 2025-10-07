@@ -3,6 +3,7 @@ let selectedProfiles = new Set();
 let timeSeriesChart = null;
 let currentBundleMetadata = null;
 let healthPanelOverride;
+let grafanaRetryTimeout = null;
 
 function escapeHTML(value) {
   if (value === null || value === undefined) return '';
@@ -48,8 +49,52 @@ async function fetchBundles() {
   });
   
   renderBundles(bundles);
+  updatePrometheusButton(bundles);
+  updateGrafanaButton(bundles);
   updateComparisonPanel();
   updateTimeSeriesButton();
+}
+
+function updateGrafanaButton(bundles) {
+  const button = document.getElementById('grafana-btn');
+  if (!button) return;
+
+  const bundleWithGrafana = bundles.find(b => b.grafanaUrl && isSafeURL(b.grafanaUrl));
+  if (bundleWithGrafana) {
+    const folderUrl = bundleWithGrafana.grafanaFolderUrl && isSafeURL(bundleWithGrafana.grafanaFolderUrl)
+      ? bundleWithGrafana.grafanaFolderUrl
+      : bundleWithGrafana.grafanaUrl;
+    button.href = folderUrl;
+    button.style.display = '';
+    if (grafanaRetryTimeout !== null) {
+      clearTimeout(grafanaRetryTimeout);
+      grafanaRetryTimeout = null;
+    }
+  } else {
+    button.style.display = 'none';
+    const hasPrometheus = bundles.some(b => b.prometheusUrl && isSafeURL(b.prometheusUrl));
+    if (hasPrometheus && grafanaRetryTimeout === null) {
+      grafanaRetryTimeout = setTimeout(() => {
+        grafanaRetryTimeout = null;
+        fetchBundles().catch(() => {
+          // ignore errors; next manual refresh will try again
+        });
+      }, 2000);
+    }
+  }
+}
+
+function updatePrometheusButton(bundles) {
+  const button = document.getElementById('prometheus-btn');
+  if (!button) return;
+
+  const bundleWithPrometheus = bundles.find(b => b.prometheusUrl && isSafeURL(b.prometheusUrl));
+  if (bundleWithPrometheus) {
+    button.href = bundleWithPrometheus.prometheusUrl;
+    button.style.display = '';
+  } else {
+    button.style.display = 'none';
+  }
 }
 
 function displayBundleMetadata(bundle) {

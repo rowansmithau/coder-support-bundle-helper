@@ -2,9 +2,11 @@ package main
 
 import (
 	"archive/zip"
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
+	"embed"
 	"encoding/base64"
 	"encoding/csv"
 	"encoding/json"
@@ -12,7 +14,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -30,22 +34,29 @@ import (
 	"syscall"
 	"time"
 
-	_ "embed"
-
 	"github.com/google/pprof/profile"
 	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	dto "github.com/prometheus/client_model/go"
+	"github.com/prometheus/common/expfmt"
+	"github.com/prometheus/common/model"
+	"github.com/prometheus/common/promslog"
+	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/storage"
+	"github.com/prometheus/prometheus/tsdb"
 )
 
 // Constants and configuration
 const (
-	maxBundleSize     = 10 << 30 // 10GB
-	maxProfileSize    = 1 << 30  // 1GB
-	maxConcurrentOps  = 10
-	pprofTimeout      = 30 * time.Minute
-	defaultListenAddr = "127.0.0.1:6969"
-	maxGzipLayers     = 5
+	maxBundleSize      = 10 << 30 // 10GB
+	maxProfileSize     = 1 << 30  // 1GB
+	maxConcurrentOps   = 10
+	pprofTimeout       = 30 * time.Minute
+	defaultListenAddr  = "127.0.0.1:6969"
+	maxGzipLayers      = 5
+	grafanaProviderUID = "coder-provider"
+	grafanaFolderUID   = "coder-dashboards"
 )
 
 // Metrics
@@ -92,13 +103,27 @@ type StoredProfile struct {
 }
 
 type Bundle struct {
-	ID       string           `json:"id"`
-	Name     string           `json:"name"`
-	Created  time.Time        `json:"created"`
-	Profiles []*StoredProfile `json:"profiles"`
-	Warnings []string         `json:"warnings,omitempty"`
-	Path     string           `json:"path"`
-	Metadata *BundleMetadata  `json:"metadata,omitempty"`
+	ID               string                `json:"id"`
+	Name             string                `json:"name"`
+	Created          time.Time             `json:"created"`
+	Profiles         []*StoredProfile      `json:"profiles"`
+	Warnings         []string              `json:"warnings,omitempty"`
+	Path             string                `json:"path"`
+	Metadata         *BundleMetadata       `json:"metadata,omitempty"`
+	Prometheus       []*PrometheusSnapshot `json:"prometheus,omitempty"`
+	PrometheusURL    string                `json:"prometheusUrl,omitempty"`
+	GrafanaURL       string                `json:"grafanaUrl,omitempty"`
+	GrafanaFolderURL string                `json:"grafanaFolderUrl,omitempty"`
+}
+
+type PrometheusSnapshot struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Source    string    `json:"source"`
+	Path      string    `json:"path"`
+	Size      int       `json:"size"`
+	CreatedAt time.Time `json:"createdAt"`
+	Content   []byte    `json:"-"`
 }
 
 type BundleMetadata struct {
@@ -143,6 +168,20 @@ type Store struct {
 
 	// Semaphore for limiting concurrent operations
 	semaphore chan struct{}
+
+	promMu         sync.Mutex
+	promInstances  map[string]*PrometheusInstance
+	promBaseDir    string
+	promBinary     string
+	promGoCacheDir string
+	promGoModDir   string
+
+	grafMu        sync.Mutex
+	grafInstance  *GrafanaInstance
+	grafBaseDir   string
+	grafBinary    string
+	grafHome      string
+	grafFolderURL string
 }
 
 type pprofInstance struct {
@@ -153,19 +192,68 @@ type pprofInstance struct {
 	CreatedAt time.Time
 }
 
+type PrometheusInstance struct {
+	BundleID  string    `json:"bundleId"`
+	URL       string    `json:"url"`
+	Address   string    `json:"address"`
+	StartedAt time.Time `json:"startedAt"`
+	cmd       *exec.Cmd
+	dataDir   string
+	cancel    context.CancelFunc
+	done      chan struct{}
+}
+
+type GrafanaInstance struct {
+	URL           string    `json:"url"`
+	Address       string    `json:"address"`
+	PrometheusURL string    `json:"prometheusUrl"`
+	StartedAt     time.Time `json:"startedAt"`
+	cmd           *exec.Cmd
+	cancel        context.CancelFunc
+	done          chan struct{}
+	baseDir       string
+}
+
 func NewStore(logger *slog.Logger) *Store {
+	promBase := filepath.Join(os.TempDir(), "coder-support-prom")
+	_ = os.MkdirAll(promBase, 0o755)
+	promGoCache := filepath.Join(promBase, "gocache")
+	promGoMod := filepath.Join(promBase, "gomodcache")
+	_ = os.MkdirAll(promGoCache, 0o755)
+	_ = os.MkdirAll(promGoMod, 0o755)
+
+	grafBase := filepath.Join(os.TempDir(), "coder-support-grafana")
+	_ = os.MkdirAll(grafBase, 0o755)
+
 	return &Store{
-		bundles:      make(map[string]*Bundle),
-		profiles:     make(map[string]*StoredProfile),
-		pprofTargets: make(map[string]*pprofInstance),
-		semaphore:    make(chan struct{}, maxConcurrentOps),
-		logger:       logger,
+		bundles:        make(map[string]*Bundle),
+		profiles:       make(map[string]*StoredProfile),
+		pprofTargets:   make(map[string]*pprofInstance),
+		semaphore:      make(chan struct{}, maxConcurrentOps),
+		logger:         logger,
+		promInstances:  make(map[string]*PrometheusInstance),
+		promBaseDir:    promBase,
+		promGoCacheDir: promGoCache,
+		promGoModDir:   promGoMod,
+		grafBaseDir:    grafBase,
 	}
 }
 
 func (s *Store) AddBundle(b *Bundle) {
+	s.StopPrometheus(b.ID)
+
+	s.grafMu.Lock()
+	currentGrafURL := ""
+	currentGrafFolder := ""
+	if s.grafInstance != nil {
+		currentGrafURL = s.grafInstance.URL
+	}
+	if s.grafFolderURL != "" {
+		currentGrafFolder = s.grafFolderURL
+	}
+	s.grafMu.Unlock()
+
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	if existing, ok := s.bundles[b.ID]; ok {
 		for _, p := range existing.Profiles {
@@ -173,6 +261,8 @@ func (s *Store) AddBundle(b *Bundle) {
 		}
 	}
 	s.bundles[b.ID] = b
+	b.GrafanaURL = currentGrafURL
+	b.GrafanaFolderURL = currentGrafFolder
 	for _, p := range b.Profiles {
 		p.BundleID = b.ID
 		s.profiles[p.ID] = p
@@ -182,6 +272,33 @@ func (s *Store) AddBundle(b *Bundle) {
 		slog.String("id", b.ID),
 		slog.String("name", b.Name),
 		slog.Int("profiles", len(b.Profiles)))
+	shouldStart := len(b.Prometheus) > 0
+	bundleID := b.ID
+	s.mu.Unlock()
+
+	if shouldStart {
+		go func() {
+			inst, err := s.StartPrometheus(context.Background(), bundleID)
+			if err != nil {
+				s.logger.Warn("auto start prometheus failed",
+					slog.String("bundle", bundleID),
+					slog.String("error", err.Error()))
+				return
+			}
+			s.logger.Info("prometheus auto-started",
+				slog.String("bundle", bundleID),
+				slog.String("url", inst.URL))
+		}()
+	}
+}
+
+func (s *Store) setGrafanaLinks(baseURL, folderURL string) {
+	s.mu.Lock()
+	for _, bundle := range s.bundles {
+		bundle.GrafanaURL = baseURL
+		bundle.GrafanaFolderURL = folderURL
+	}
+	s.mu.Unlock()
 }
 
 func (s *Store) GetBundle(id string) (*Bundle, bool) {
@@ -265,6 +382,857 @@ func (s *Store) CleanupOldProfiles(ctx context.Context) {
 			}
 			s.pprofMu.Unlock()
 		}
+	}
+}
+
+func (s *Store) StartPrometheus(ctx context.Context, bundleID string) (*PrometheusInstance, error) {
+	s.mu.RLock()
+	bundle, ok := s.bundles[bundleID]
+	s.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("bundle %q not found", bundleID)
+	}
+	if len(bundle.Prometheus) == 0 {
+		return nil, fmt.Errorf("bundle %q does not contain prometheus metrics", bundleID)
+	}
+
+	s.promMu.Lock()
+	defer s.promMu.Unlock()
+
+	if inst, ok := s.promInstances[bundleID]; ok && inst.cmd != nil && inst.cmd.Process != nil {
+		if _, err := s.ensureGrafana(inst.URL); err != nil {
+			return nil, err
+		}
+		return inst, nil
+	}
+
+	baseDir := filepath.Join(s.promBaseDir, bundleID)
+	dataDir := filepath.Join(baseDir, "data")
+	if err := os.RemoveAll(baseDir); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("reset prometheus dir: %w", err)
+	}
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		return nil, fmt.Errorf("create prometheus data dir: %w", err)
+	}
+
+	if err := s.buildTSDBFromSnapshots(bundleID, bundle.Prometheus, dataDir); err != nil {
+		return nil, err
+	}
+
+	configPath := filepath.Join(baseDir, "prometheus.yml")
+	configContent := []byte("global:\n  scrape_interval: 1m\nscrape_configs: []\n")
+	if err := os.WriteFile(configPath, configContent, 0o644); err != nil {
+		return nil, fmt.Errorf("write prometheus config: %w", err)
+	}
+
+	bin, err := s.ensurePrometheusBinary()
+	if err != nil {
+		return nil, err
+	}
+
+	addr, err := chooseFreeAddress()
+	if err != nil {
+		return nil, fmt.Errorf("allocate listen address: %w", err)
+	}
+
+	cmdCtx, cancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(cmdCtx, bin,
+		"--config.file", configPath,
+		"--storage.tsdb.path", dataDir,
+		"--web.listen-address", addr,
+		"--storage.tsdb.retention.time=168h",
+		"--log.level=warn",
+	)
+	cmd.Env = append(os.Environ(),
+		"GOMODCACHE="+s.promGoModDir,
+		"GOCACHE="+s.promGoCacheDir,
+	)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("prometheus stdout: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("prometheus stderr: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return nil, fmt.Errorf("start prometheus: %w", err)
+	}
+
+	go s.streamCommandOutput(stdout, "prometheus", bundleID, "stdout")
+	go s.streamCommandOutput(stderr, "prometheus", bundleID, "stderr")
+
+	done := make(chan struct{})
+	inst := &PrometheusInstance{
+		BundleID:  bundleID,
+		URL:       "http://" + addr,
+		Address:   addr,
+		StartedAt: time.Now(),
+		cmd:       cmd,
+		dataDir:   baseDir,
+		cancel:    cancel,
+		done:      done,
+	}
+
+	s.promInstances[bundleID] = inst
+
+	if _, err := s.ensureGrafana(inst.URL); err != nil {
+		s.logger.Error("grafana failed to start",
+			slog.String("bundle", bundleID),
+			slog.String("error", err.Error()))
+		s.stopPrometheusLocked(bundleID)
+		return nil, err
+	}
+
+	s.mu.Lock()
+	if stored, ok := s.bundles[bundleID]; ok {
+		stored.PrometheusURL = inst.URL
+	}
+	s.mu.Unlock()
+
+	go func(inst *PrometheusInstance) {
+		err := cmd.Wait()
+		if err != nil {
+			s.logger.Error("prometheus exited", slog.String("bundle", bundleID), slog.String("error", err.Error()))
+		}
+		s.promMu.Lock()
+		delete(s.promInstances, bundleID)
+		var nextProm *PrometheusInstance
+		for _, candidate := range s.promInstances {
+			nextProm = candidate
+			break
+		}
+		stopGrafana := len(s.promInstances) == 0
+		s.promMu.Unlock()
+		if stopGrafana {
+			s.grafMu.Lock()
+			s.stopGrafanaLocked()
+			s.grafMu.Unlock()
+		} else if nextProm != nil {
+			s.grafMu.Lock()
+			needsUpdate := s.grafInstance != nil && s.grafInstance.PrometheusURL == inst.URL
+			s.grafMu.Unlock()
+			if needsUpdate {
+				if _, err := s.ensureGrafana(nextProm.URL); err != nil {
+					s.logger.Warn("failed to retarget grafana",
+						slog.String("from", inst.URL),
+						slog.String("to", nextProm.URL),
+						slog.String("error", err.Error()))
+				}
+			}
+		}
+		s.mu.Lock()
+		if stored, ok := s.bundles[bundleID]; ok {
+			stored.PrometheusURL = ""
+		}
+		s.mu.Unlock()
+		close(done)
+	}(inst)
+
+	return inst, nil
+}
+
+func (s *Store) StopPrometheus(bundleID string) {
+	s.promMu.Lock()
+	s.stopPrometheusLocked(bundleID)
+	s.promMu.Unlock()
+}
+
+func (s *Store) stopPrometheusLocked(bundleID string) {
+	inst, ok := s.promInstances[bundleID]
+	if !ok {
+		return
+	}
+	if inst.cancel != nil {
+		inst.cancel()
+	}
+	if inst.cmd != nil && inst.cmd.Process != nil {
+		_ = inst.cmd.Process.Signal(syscall.SIGTERM)
+		if inst.done != nil {
+			select {
+			case <-inst.done:
+			case <-time.After(5 * time.Second):
+				_ = inst.cmd.Process.Kill()
+			}
+		}
+	}
+	delete(s.promInstances, bundleID)
+	var nextProm *PrometheusInstance
+	for _, candidate := range s.promInstances {
+		nextProm = candidate
+		break
+	}
+	stopGrafana := len(s.promInstances) == 0
+	s.mu.Lock()
+	if stored, ok := s.bundles[bundleID]; ok {
+		stored.PrometheusURL = ""
+	}
+	s.mu.Unlock()
+	if stopGrafana {
+		s.grafMu.Lock()
+		s.stopGrafanaLocked()
+		s.grafMu.Unlock()
+	} else if nextProm != nil {
+		s.grafMu.Lock()
+		needsUpdate := s.grafInstance != nil && s.grafInstance.PrometheusURL == inst.URL
+		s.grafMu.Unlock()
+		if needsUpdate {
+			if _, err := s.ensureGrafana(nextProm.URL); err != nil {
+				s.logger.Warn("failed to retarget grafana",
+					slog.String("from", inst.URL),
+					slog.String("to", nextProm.URL),
+					slog.String("error", err.Error()))
+			}
+		}
+	}
+}
+
+func (s *Store) ensurePrometheusBinary() (string, error) {
+	if s.promBinary != "" {
+		if _, err := os.Stat(s.promBinary); err == nil {
+			return s.promBinary, nil
+		}
+	}
+
+	bin, err := exec.LookPath("prometheus")
+	if err != nil {
+		return "", fmt.Errorf("prometheus binary not found: %w", err)
+	}
+	s.promBinary = bin
+	return bin, nil
+}
+
+func (s *Store) writeGrafanaDashboards(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	files, err := fs.Glob(grafanaDashboardsFS, "web/dashboards/*.json")
+	if err != nil {
+		return err
+	}
+	for _, name := range files {
+		data, err := grafanaDashboardsFS.ReadFile(name)
+		if err != nil {
+			return err
+		}
+		dest := filepath.Join(dir, filepath.Base(name))
+		if err := os.WriteFile(dest, data, 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) ensureGrafanaBinary() (string, error) {
+	if s.grafBinary != "" {
+		if _, err := os.Stat(s.grafBinary); err == nil {
+			return s.grafBinary, nil
+		}
+	}
+
+	envHome := strings.TrimSpace(os.Getenv("GF_PATHS_HOME"))
+	if envHome != "" {
+		if info, err := os.Stat(filepath.Join(envHome, "conf", "defaults.ini")); err == nil && !info.IsDir() {
+			s.grafHome = envHome
+		} else if s.logger != nil {
+			s.logger.Warn("GF_PATHS_HOME does not look like a Grafana installation",
+				slog.String("path", envHome))
+		}
+	}
+
+	var lastErr error
+	paths := make([]string, 0, 4)
+	for _, name := range []string{"grafana", "grafana-server"} {
+		if bin, err := exec.LookPath(name); err == nil {
+			paths = append(paths, bin)
+		} else {
+			lastErr = err
+		}
+	}
+	paths = append(paths,
+		"/opt/homebrew/bin/grafana",
+		"/usr/local/bin/grafana",
+	)
+
+	for _, bin := range paths {
+		if bin == "" {
+			continue
+		}
+		if _, err := os.Stat(bin); err != nil {
+			continue
+		}
+		s.grafBinary = bin
+		if s.grafHome == "" {
+			home, detectErr := detectGrafanaHome(bin)
+			if detectErr != nil {
+				lastErr = detectErr
+				continue
+			}
+			s.grafHome = home
+		}
+		return bin, nil
+	}
+
+	if lastErr != nil {
+		return "", fmt.Errorf("grafana binary not found: %w", lastErr)
+	}
+	return "", fmt.Errorf("grafana binary not found: install grafana (brew install grafana | sudo apt-get install grafana | sudo dnf install grafana | choco install grafana)")
+}
+
+func detectGrafanaHome(bin string) (string, error) {
+	resolved := bin
+	if target, err := filepath.EvalSymlinks(bin); err == nil && target != "" {
+		resolved = target
+	}
+
+	addCandidate := func(list *[]string, seen map[string]struct{}, path string) {
+		if path == "" {
+			return
+		}
+		clean := filepath.Clean(path)
+		if clean == "." || clean == string(filepath.Separator) {
+			return
+		}
+		if _, ok := seen[clean]; ok {
+			return
+		}
+		seen[clean] = struct{}{}
+		*list = append(*list, clean)
+	}
+
+	binDir := filepath.Dir(resolved)
+	seen := make(map[string]struct{})
+	candidates := make([]string, 0, 8)
+	addCandidate(&candidates, seen, filepath.Join(binDir, ".."))
+	root := filepath.Dir(binDir)
+	addCandidate(&candidates, seen, filepath.Join(root, "share", "grafana"))
+	addCandidate(&candidates, seen, filepath.Join(root, "lib", "grafana"))
+	addCandidate(&candidates, seen, filepath.Join(root, "grafana"))
+	addCandidate(&candidates, seen, filepath.Join(binDir, "..", ".."))
+
+	for _, known := range []string{
+		"/usr/share/grafana",
+		"/usr/local/share/grafana",
+		"/opt/homebrew/share/grafana",
+	} {
+		addCandidate(&candidates, seen, known)
+	}
+
+	for _, cand := range candidates {
+		if info, err := os.Stat(filepath.Join(cand, "conf", "defaults.ini")); err == nil && !info.IsDir() {
+			return cand, nil
+		}
+	}
+
+	return "", fmt.Errorf("could not locate Grafana config defaults near %q", resolved)
+}
+
+func (s *Store) ensureGrafana(promURL string) (*GrafanaInstance, error) {
+	if promURL == "" {
+		return nil, fmt.Errorf("prometheus url required to start grafana")
+	}
+	s.grafMu.Lock()
+	inst, err := s.ensureGrafanaLocked(promURL)
+	s.grafMu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	s.setGrafanaLinks(inst.URL, s.grafFolderURL)
+	return inst, nil
+}
+
+func (s *Store) ensureGrafanaLocked(promURL string) (*GrafanaInstance, error) {
+	if s.grafInstance != nil && s.grafInstance.cmd != nil && s.grafInstance.cmd.Process != nil {
+		if s.grafInstance.PrometheusURL == promURL {
+			return s.grafInstance, nil
+		}
+		s.stopGrafanaLocked()
+	}
+
+	bin, err := s.ensureGrafanaBinary()
+	if err != nil {
+		return nil, err
+	}
+
+	baseDir := filepath.Join(s.grafBaseDir, "instance")
+	if err := os.RemoveAll(baseDir); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("reset grafana dir: %w", err)
+	}
+
+	dataDir := filepath.Join(baseDir, "data")
+	logsDir := filepath.Join(baseDir, "logs")
+	pluginsDir := filepath.Join(baseDir, "plugins")
+	provisionDir := filepath.Join(baseDir, "provisioning")
+	dashboardConfigDir := filepath.Join(provisionDir, "dashboards")
+	dashboardContentDir := filepath.Join(baseDir, "dashboards")
+	dataSourceDir := filepath.Join(provisionDir, "datasources")
+	alertingDir := filepath.Join(provisionDir, "alerting")
+	pluginProvDir := filepath.Join(provisionDir, "plugins")
+
+	for _, dir := range []string{dataDir, logsDir, pluginsDir, dashboardConfigDir, dataSourceDir, alertingDir, pluginProvDir, dashboardContentDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("create grafana dir %q: %w", dir, err)
+		}
+	}
+
+	if err := s.writeGrafanaDashboards(dashboardContentDir); err != nil {
+		return nil, fmt.Errorf("write grafana dashboards: %w", err)
+	}
+
+	datasourceConfig := fmt.Sprintf(`apiVersion: 1
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: %s
+    isDefault: true
+    editable: false
+`, promURL)
+
+	if err := os.WriteFile(filepath.Join(dataSourceDir, "datasource.yaml"), []byte(datasourceConfig), 0o644); err != nil {
+		return nil, fmt.Errorf("write grafana datasource config: %w", err)
+	}
+
+	dashboardsConfig := fmt.Sprintf(`apiVersion: 1
+providers:
+  - name: Coder Dashboards
+    uid: %s
+    orgId: 1
+    folder: Coder
+    folderUid: %s
+    type: file
+    disableDeletion: false
+    editable: true
+    allowUiUpdates: true
+    updateIntervalSeconds: 30
+    options:
+      path: %q
+`, grafanaProviderUID, grafanaFolderUID, dashboardContentDir)
+
+	if err := os.WriteFile(filepath.Join(dashboardConfigDir, "coder.yaml"), []byte(dashboardsConfig), 0o644); err != nil {
+		return nil, fmt.Errorf("write grafana dashboards config: %w", err)
+	}
+
+	addr, err := chooseFreeAddress()
+	if err != nil {
+		return nil, fmt.Errorf("allocate grafana address: %w", err)
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid grafana address %q: %w", addr, err)
+	}
+
+	cmdCtx, cancel := context.WithCancel(context.Background())
+	args := make([]string, 0, 4)
+	baseName := strings.ToLower(filepath.Base(bin))
+	baseName = strings.TrimSuffix(baseName, ".exe")
+	if baseName == "grafana" {
+		args = append(args, "server")
+	}
+	if s.grafHome != "" {
+		args = append(args, "--homepath", s.grafHome)
+	}
+	cmd := exec.CommandContext(cmdCtx, bin, args...)
+	if s.grafHome != "" {
+		cmd.Dir = s.grafHome
+	}
+	env := append(os.Environ(),
+		"GF_SERVER_HTTP_ADDR="+host,
+		"GF_SERVER_HTTP_PORT="+port,
+		"GF_SERVER_DOMAIN="+host,
+		"GF_AUTH_ANONYMOUS_ENABLED=true",
+		"GF_AUTH_ANONYMOUS_ORG_ROLE=Editor",
+		"GF_USERS_EDITORS_CAN_ADMIN=true",
+		"GF_USERS_ALLOW_SIGN_UP=false",
+		"GF_USERS_AUTO_ASSIGN_ORG=true",
+		"GF_USERS_AUTO_ASSIGN_ORG_ROLE=Editor",
+		"GF_ANALYTICS_REPORTING_ENABLED=false",
+		"GF_ANALYTICS_CHECK_FOR_UPDATES=false",
+		"GF_LOG_MODE=console",
+		"GF_LOG_CONSOLE_LEVEL=error",
+		"GF_PATHS_DATA="+dataDir,
+		"GF_PATHS_LOGS="+logsDir,
+		"GF_PATHS_PLUGINS="+pluginsDir,
+		"GF_PATHS_PROVISIONING="+provisionDir,
+	)
+	if s.grafHome != "" {
+		env = append(env, "GF_PATHS_HOME="+s.grafHome)
+	}
+	cmd.Env = env
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("grafana stdout: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("grafana stderr: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return nil, fmt.Errorf("start grafana: %w", err)
+	}
+
+	go s.streamCommandOutput(stdout, "grafana", "global", "stdout")
+	go s.streamCommandOutput(stderr, "grafana", "global", "stderr")
+
+	done := make(chan struct{})
+	inst := &GrafanaInstance{
+		URL:           "http://" + addr,
+		Address:       addr,
+		PrometheusURL: promURL,
+		StartedAt:     time.Now(),
+		cmd:           cmd,
+		cancel:        cancel,
+		done:          done,
+		baseDir:       baseDir,
+	}
+
+	folderURL := ""
+	if inst.URL != "" {
+		base := strings.TrimSuffix(inst.URL, "/")
+		folderURL = base + "/dashboards/f/" + grafanaFolderUID + "?orgId=1"
+	}
+	s.grafFolderURL = folderURL
+
+	s.grafInstance = inst
+
+	go func(current *GrafanaInstance) {
+		err := cmd.Wait()
+		if err != nil {
+			s.logger.Error("grafana exited", slog.String("error", err.Error()))
+		}
+		s.grafMu.Lock()
+		if s.grafInstance == current {
+			s.grafInstance = nil
+			s.grafFolderURL = ""
+		}
+		s.grafMu.Unlock()
+		s.setGrafanaLinks("", "")
+		close(done)
+		_ = os.RemoveAll(baseDir)
+	}(inst)
+
+	s.logger.Info("grafana started",
+		slog.String("url", inst.URL),
+		slog.String("prometheus", promURL))
+
+	return inst, nil
+}
+
+func (s *Store) stopGrafanaLocked() {
+	if s.grafInstance == nil {
+		return
+	}
+	inst := s.grafInstance
+	if inst.cancel != nil {
+		inst.cancel()
+	}
+	if inst.cmd != nil && inst.cmd.Process != nil {
+		_ = inst.cmd.Process.Signal(syscall.SIGTERM)
+		if inst.done != nil {
+			select {
+			case <-inst.done:
+			case <-time.After(5 * time.Second):
+				_ = inst.cmd.Process.Kill()
+			}
+		}
+	}
+	s.grafInstance = nil
+	s.grafFolderURL = ""
+	s.setGrafanaLinks("", "")
+	if inst.baseDir != "" {
+		_ = os.RemoveAll(inst.baseDir)
+	}
+}
+
+func (s *Store) StopGrafana() {
+	s.grafMu.Lock()
+	s.stopGrafanaLocked()
+	s.grafMu.Unlock()
+}
+
+func (s *Store) buildTSDBFromSnapshots(bundleID string, snapshots []*PrometheusSnapshot, dataDir string) error {
+	if len(snapshots) == 0 {
+		return fmt.Errorf("bundle %q does not contain prometheus metrics", bundleID)
+	}
+
+	entries, err := os.ReadDir(dataDir)
+	if err == nil {
+		for _, entry := range entries {
+			_ = os.RemoveAll(filepath.Join(dataDir, entry.Name()))
+		}
+	}
+
+	writer, err := tsdb.NewBlockWriter(promslog.NewNopLogger(), dataDir, int64(4*time.Hour/time.Millisecond))
+	if err != nil {
+		return fmt.Errorf("create block writer: %w", err)
+	}
+	defer writer.Close()
+
+	ctx := context.Background()
+	app := writer.Appender(ctx)
+	totalSamples := 0
+	baseNow := time.Now().UnixMilli()
+
+	for idx, snap := range snapshots {
+		content, _, err := detectAndDecompressAll(snap.Content)
+		if err != nil {
+			return fmt.Errorf("decompress metrics %s: %w", snap.Name, err)
+		}
+		if len(content) == 0 {
+			continue
+		}
+		if content[len(content)-1] != '\n' {
+			content = append(content, '\n')
+		}
+		parser := expfmt.NewTextParser(model.LegacyValidation)
+		families, err := parser.TextToMetricFamilies(bytes.NewReader(content))
+		if err != nil {
+			return fmt.Errorf("parse metrics %s: %w", snap.Name, err)
+		}
+
+		baseTs := baseNow + int64(idx*1000)
+		if !snap.CreatedAt.IsZero() {
+			baseTs = snap.CreatedAt.UnixMilli()
+		}
+
+		extraBase := map[string]string{
+			"bundle_id": bundleID,
+		}
+		if snap.Source != "" {
+			extraBase["snapshot_source"] = snap.Source
+		}
+		if snap.Name != "" {
+			extraBase["snapshot_name"] = snap.Name
+		}
+
+		for name, fam := range families {
+			for _, metric := range fam.Metric {
+				ts := baseTs
+				if metric.TimestampMs != nil && metric.GetTimestampMs() > 0 {
+					ts = metric.GetTimestampMs()
+				}
+				count, err := s.appendMetricSamples(app, name, fam.GetType(), metric, ts, extraBase)
+				if err != nil {
+					return fmt.Errorf("append metric %s: %w", name, err)
+				}
+				totalSamples += count
+			}
+		}
+	}
+
+	if totalSamples == 0 {
+		return fmt.Errorf("no samples generated from prometheus metrics")
+	}
+
+	if err := app.Commit(); err != nil {
+		return fmt.Errorf("commit prometheus samples: %w", err)
+	}
+	if _, err := writer.Flush(ctx); err != nil {
+		return fmt.Errorf("flush prometheus block: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) appendMetricSamples(app storage.Appender, name string, famType dto.MetricType, metric *dto.Metric, ts int64, extra map[string]string) (int, error) {
+	samples := 0
+	switch famType {
+	case dto.MetricType_COUNTER:
+		if metric.GetCounter() == nil {
+			return 0, nil
+		}
+		count, err := addSample(app, metric, name, metric.GetCounter().GetValue(), ts, extra)
+		samples += count
+		return samples, err
+	case dto.MetricType_GAUGE:
+		if metric.GetGauge() == nil {
+			return 0, nil
+		}
+		count, err := addSample(app, metric, name, metric.GetGauge().GetValue(), ts, extra)
+		samples += count
+		return samples, err
+	case dto.MetricType_UNTYPED:
+		if metric.GetUntyped() == nil {
+			return 0, nil
+		}
+		count, err := addSample(app, metric, name, metric.GetUntyped().GetValue(), ts, extra)
+		samples += count
+		return samples, err
+	case dto.MetricType_SUMMARY:
+		summary := metric.GetSummary()
+		if summary == nil {
+			return 0, nil
+		}
+		for _, q := range summary.Quantile {
+			extraQ := cloneExtra(extra)
+			extraQ["quantile"] = formatFloat(q.GetQuantile())
+			count, err := addSample(app, metric, name, q.GetValue(), ts, extraQ)
+			samples += count
+			if err != nil {
+				return samples, err
+			}
+		}
+		if summary.SampleSum != nil {
+			count, err := addSample(app, metric, name+"_sum", summary.GetSampleSum(), ts, extra)
+			samples += count
+			if err != nil {
+				return samples, err
+			}
+		}
+		if summary.SampleCount != nil {
+			count, err := addSample(app, metric, name+"_count", float64(summary.GetSampleCount()), ts, extra)
+			samples += count
+			if err != nil {
+				return samples, err
+			}
+		}
+		return samples, nil
+	case dto.MetricType_HISTOGRAM, dto.MetricType_GAUGE_HISTOGRAM:
+		hist := metric.GetHistogram()
+		if hist == nil {
+			return 0, nil
+		}
+		for _, bucket := range hist.Bucket {
+			extraB := cloneExtra(extra)
+			extraB["le"] = formatLE(bucket.GetUpperBound())
+			count, err := addSample(app, metric, name+"_bucket", float64(bucket.GetCumulativeCount()), ts, extraB)
+			samples += count
+			if err != nil {
+				return samples, err
+			}
+		}
+		extraInf := cloneExtra(extra)
+		extraInf["le"] = "+Inf"
+		count, err := addSample(app, metric, name+"_bucket", float64(hist.GetSampleCount()), ts, extraInf)
+		samples += count
+		if err != nil {
+			return samples, err
+		}
+		if hist.SampleSum != nil {
+			count, err := addSample(app, metric, name+"_sum", hist.GetSampleSum(), ts, extra)
+			samples += count
+			if err != nil {
+				return samples, err
+			}
+		}
+		if hist.SampleCount != nil {
+			count, err := addSample(app, metric, name+"_count", float64(hist.GetSampleCount()), ts, extra)
+			samples += count
+			if err != nil {
+				return samples, err
+			}
+		}
+		return samples, nil
+	default:
+		// Treat unknown types as gauge if possible.
+		if metric.GetGauge() != nil {
+			count, err := addSample(app, metric, name, metric.GetGauge().GetValue(), ts, extra)
+			samples += count
+			return samples, err
+		}
+		if metric.GetUntyped() != nil {
+			count, err := addSample(app, metric, name, metric.GetUntyped().GetValue(), ts, extra)
+			samples += count
+			return samples, err
+		}
+		s.logger.Warn("unsupported metric type", slog.String("name", name), slog.Any("type", famType))
+	}
+	return samples, nil
+}
+
+func addSample(app storage.Appender, metric *dto.Metric, name string, value float64, ts int64, extra map[string]string) (int, error) {
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0, nil
+	}
+	labelsMap := make(map[string]string, len(metric.Label)+1+len(extra))
+	labelsMap["__name__"] = name
+	for _, lp := range metric.Label {
+		if lp.GetName() == "" {
+			continue
+		}
+		labelsMap[lp.GetName()] = lp.GetValue()
+	}
+	for k, v := range extra {
+		if v == "" {
+			continue
+		}
+		labelsMap[k] = v
+	}
+	lset := labels.FromMap(labelsMap)
+	if len(labelsMap) == 0 {
+		return 0, nil
+	}
+	if _, err := app.Append(0, lset, ts, value); err != nil {
+		return 0, err
+	}
+	return 1, nil
+}
+
+func cloneExtra(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return map[string]string{}
+	}
+	out := make(map[string]string, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
+func formatFloat(v float64) string {
+	return strconv.FormatFloat(v, 'g', -1, 64)
+}
+
+func formatLE(v float64) string {
+	if math.IsInf(v, +1) {
+		return "+Inf"
+	}
+	return formatFloat(v)
+}
+
+func chooseFreeAddress() (string, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", err
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+	return addr, nil
+}
+
+func (s *Store) streamCommandOutput(r io.Reader, component, identifier, stream string) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		fields := []any{
+			slog.String("component", component),
+			slog.String("id", identifier),
+			slog.String("stream", stream),
+			slog.String("line", line),
+		}
+		if component == "grafana" {
+			s.logger.Info("process output", fields...)
+		} else {
+			s.logger.Debug("process output", fields...)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		s.logger.Warn("process stream error",
+			slog.String("component", component),
+			slog.String("id", identifier),
+			slog.String("stream", stream),
+			slog.String("error", err.Error()))
 	}
 }
 
@@ -437,12 +1405,50 @@ func loadBundleFromZip(r io.ReaderAt, size int64, filename string) *LoadResult {
 		b.Created = *captured
 	}
 
-	var profs []*StoredProfile
+	var (
+		profs     []*StoredProfile
+		promSnaps []*PrometheusSnapshot
+	)
 	for _, f := range zr.File {
+		lower := strings.ToLower(f.Name)
+		if strings.HasSuffix(lower, "prometheus.txt") {
+			rc, err := f.Open()
+			if err != nil {
+				warning := fmt.Sprintf("failed to open %s: %v", f.Name, err)
+				result.Warnings = append(result.Warnings, warning)
+				continue
+			}
+			content, err := io.ReadAll(rc)
+			rc.Close()
+			if err != nil {
+				warning := fmt.Sprintf("failed to read %s: %v", f.Name, err)
+				result.Warnings = append(result.Warnings, warning)
+				continue
+			}
+
+			source := "unknown"
+			switch {
+			case strings.HasPrefix(lower, "agent/"):
+				source = "agent"
+			case strings.HasPrefix(lower, "deployment/"):
+				source = "deployment"
+			}
+
+			promSnaps = append(promSnaps, &PrometheusSnapshot{
+				ID:        makeID(b.ID, f.Name),
+				Name:      filepath.Base(f.Name),
+				Source:    source,
+				Path:      f.Name,
+				Size:      len(content),
+				CreatedAt: b.Created,
+				Content:   content,
+			})
+			continue
+		}
+
 		if !strings.HasPrefix(f.Name, "pprof/") {
 			continue
 		}
-		lower := strings.ToLower(f.Name)
 		if !(strings.HasSuffix(lower, ".pprof") ||
 			strings.HasSuffix(lower, ".pprof.gz") ||
 			strings.HasSuffix(lower, ".prof.gz") ||
@@ -458,7 +1464,7 @@ func loadBundleFromZip(r io.ReaderAt, size int64, filename string) *LoadResult {
 		}
 
 		content, err := io.ReadAll(rc)
-		_ = rc.Close()
+		rc.Close()
 		if err != nil {
 			warning := fmt.Sprintf("failed to read %s: %v", f.Name, err)
 			result.Warnings = append(result.Warnings, warning)
@@ -478,7 +1484,7 @@ func loadBundleFromZip(r io.ReaderAt, size int64, filename string) *LoadResult {
 				if bb, err := io.ReadAll(rc2); err == nil {
 					meta["cmdline.txt"] = strings.TrimSpace(string(bb))
 				}
-				_ = rc2.Close()
+				rc2.Close()
 			}
 		}
 
@@ -508,6 +1514,7 @@ func loadBundleFromZip(r io.ReaderAt, size int64, filename string) *LoadResult {
 		sort.Slice(profs, func(i, j int) bool { return profs[i].Name < profs[j].Name })
 		b.Profiles = profs
 	}
+	b.Prometheus = promSnaps
 	b.Warnings = result.Warnings
 	result.Bundle = b
 
@@ -1495,6 +2502,44 @@ func handleListBundles(s *Store) http.HandlerFunc {
 	}
 }
 
+func handlePrometheusStatus(s *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := mux.Vars(r)["id"]
+		bundle, ok := s.GetBundle(id)
+		if !ok {
+			http.Error(w, "bundle not found", http.StatusNotFound)
+			return
+		}
+		s.promMu.Lock()
+		inst := s.promInstances[id]
+		s.promMu.Unlock()
+		writeJSON(w, map[string]any{
+			"snapshots": bundle.Prometheus,
+			"instance":  inst,
+		})
+	}
+}
+
+func handlePrometheusStart(s *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := mux.Vars(r)["id"]
+		inst, err := s.StartPrometheus(r.Context(), id)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, inst)
+	}
+}
+
+func handlePrometheusStop(s *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := mux.Vars(r)["id"]
+		s.StopPrometheus(id)
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
 func handleGetBundle(s *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := mux.Vars(r)["id"]
@@ -1869,6 +2914,8 @@ var (
 	appJS []byte
 	//go:embed web/style.css
 	styleCSS []byte
+	//go:embed web/dashboards/*.json
+	grafanaDashboardsFS embed.FS
 )
 
 // Main function
@@ -1894,16 +2941,41 @@ func main() {
 	}
 
 	// Check for required tools
-	if _, err := exec.LookPath("dot"); err != nil {
-		logger.Error("Graphviz 'dot' not found in PATH",
-			slog.String("install_macos", "brew install graphviz"),
-			slog.String("install_debian", "sudo apt-get install graphviz"),
-			slog.String("install_fedora", "sudo dnf install graphviz"))
-		os.Exit(1)
+	checkBinary := func(name string, instructions map[string]string) {
+		if _, err := exec.LookPath(name); err != nil {
+			args := make([]any, 0, len(instructions)+1)
+			args = append(args, slog.String("binary", name))
+			for platform, cmd := range instructions {
+				args = append(args, slog.String(platform, cmd))
+			}
+			logger.Error("required binary not found in PATH", args...)
+			os.Exit(1)
+		}
 	}
+
+	checkBinary("dot", map[string]string{
+		"install_macos":   "brew install graphviz",
+		"install_debian":  "sudo apt-get install graphviz",
+		"install_fedora":  "sudo dnf install graphviz",
+		"install_arch":    "sudo pacman -S graphviz",
+		"install_windows": "choco install graphviz",
+	})
+
+	checkBinary("prometheus", map[string]string{
+		"install_macos":   "brew install prometheus",
+		"install_debian":  "sudo apt-get install prometheus",
+		"install_fedora":  "sudo dnf install prometheus",
+		"install_arch":    "sudo pacman -S prometheus",
+		"install_windows": "choco install prometheus",
+	})
 
 	// Create store
 	store := NewStore(logger)
+	if _, err := store.ensureGrafanaBinary(); err != nil {
+		logger.Error("required binary not found", slog.String("binary", "grafana-server/grafana"), slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	defer store.StopGrafana()
 
 	// Setup context with signal handling
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -1973,6 +3045,9 @@ func main() {
 	r.HandleFunc("/api/bundles", withMetrics("list_bundles", handleListBundles(store))).Methods("GET")
 	r.HandleFunc("/api/bundles", withMetrics("upload_bundle", handleUploadBundle(store))).Methods("POST")
 	r.HandleFunc("/api/bundles/{id}", withMetrics("get_bundle", handleGetBundle(store))).Methods("GET")
+	r.HandleFunc("/api/bundles/{id}/prometheus", withMetrics("prometheus_status", handlePrometheusStatus(store))).Methods("GET")
+	r.HandleFunc("/api/bundles/{id}/prometheus/start", withMetrics("prometheus_start", handlePrometheusStart(store))).Methods("POST")
+	r.HandleFunc("/api/bundles/{id}/prometheus/stop", withMetrics("prometheus_stop", handlePrometheusStop(store))).Methods("POST")
 	r.HandleFunc("/api/profiles/search", withMetrics("search_profiles", handleSearchProfiles(store))).Methods("GET")
 	r.HandleFunc("/api/profiles/compare", withMetrics("compare_profiles", handleCompareProfiles(store))).Methods("GET")
 	r.HandleFunc("/api/profiles/flamediff", withMetrics("flame_diff", handleFlameDiff(store))).Methods("GET")
@@ -2022,6 +3097,11 @@ func main() {
 	// Wait for shutdown
 	<-ctx.Done()
 	logger.Info("shutting down")
+	store.promMu.Lock()
+	for id := range store.promInstances {
+		store.stopPrometheusLocked(id)
+	}
+	store.promMu.Unlock()
 
 	// Graceful shutdown
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
