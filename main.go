@@ -1614,6 +1614,9 @@ func parseBundleMetadata(zr *zip.Reader, metadata *BundleMetadata, warnings *[]s
 							licenseInfo["type"] = "table"
 							licenseInfo["raw"] = textContent
 
+							licenses := make([]map[string]interface{}, 0)
+							validFound := false
+
 							// Parse data rows (skip header)
 							for i := 1; i < len(lines); i++ {
 								line := strings.TrimSpace(lines[i])
@@ -1621,50 +1624,64 @@ func parseBundleMetadata(zr *zip.Reader, metadata *BundleMetadata, warnings *[]s
 									continue
 								}
 
-								// Split by multiple spaces (table columns are separated by multiple spaces)
 								fields := regexp.MustCompile(`\s{2,}`).Split(line, -1)
-								if len(fields) >= 5 {
-									// Clean up fields
-									for j := range fields {
-										fields[j] = strings.TrimSpace(fields[j])
-									}
-
-									// Extract key information
-									licenseInfo["id"] = fields[0]
-									licenseInfo["uuid"] = fields[1]
-									if len(fields) > 2 {
-										licenseInfo["uploaded_at"] = fields[2]
-									}
-									if len(fields) > 3 {
-										licenseInfo["features"] = fields[3]
-									}
-									if len(fields) > 4 {
-										expiresAt := fields[4]
-										licenseInfo["expires_at"] = expiresAt
-
-										// Check if license is expired
-										if expTime, err := time.Parse(time.RFC3339, expiresAt); err == nil {
-											if time.Now().Before(expTime) {
-												metadata.LicenseValid = true
-												licenseInfo["valid"] = true
-												licenseInfo["expired"] = false
-											} else {
-												metadata.LicenseValid = false
-												licenseInfo["valid"] = false
-												licenseInfo["expired"] = true
-												*warnings = append(*warnings, fmt.Sprintf("License expired on %s", expiresAt))
-											}
-										}
-									}
-									if len(fields) > 5 {
-										licenseInfo["trial"] = fields[5]
-									}
-
-									break // Only process first data row
+								if len(fields) < 5 {
+									continue
 								}
+
+								for j := range fields {
+									fields[j] = strings.TrimSpace(fields[j])
+								}
+
+								entry := map[string]interface{}{
+									"id":   fields[0],
+									"uuid": fields[1],
+								}
+
+								if len(fields) > 2 {
+									entry["uploaded_at"] = fields[2]
+								}
+								if len(fields) > 3 {
+									entry["features"] = fields[3]
+								}
+								if len(fields) > 4 {
+									expiresAt := fields[4]
+									entry["expires_at"] = expiresAt
+
+									if expTime, err := time.Parse(time.RFC3339, expiresAt); err == nil {
+										if time.Now().Before(expTime) {
+											entry["valid"] = true
+											entry["expired"] = false
+											validFound = true
+										} else {
+											entry["valid"] = false
+											entry["expired"] = true
+											*warnings = append(*warnings, fmt.Sprintf("License expired on %s", expiresAt))
+										}
+									} else {
+										entry["valid"] = false
+									}
+								}
+								if len(fields) > 5 {
+									entry["trial"] = fields[5]
+								}
+
+								licenses = append(licenses, entry)
 							}
 
-							// Convert to JSON for storage
+							if len(licenses) > 0 {
+								licenseInfo["licenses"] = licenses
+							}
+
+							if validFound {
+								metadata.LicenseValid = true
+							} else if !metadata.LicenseValid {
+								metadata.LicenseValid = false
+							}
+							if !validFound && len(licenses) > 0 {
+								*warnings = append(*warnings, "No valid licenses found in license-status.txt")
+							}
+
 							if jsonBytes, err := json.Marshal(licenseInfo); err == nil {
 								metadata.LicenseStatus = json.RawMessage(jsonBytes)
 							} else {
