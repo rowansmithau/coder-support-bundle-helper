@@ -20,7 +20,13 @@
 
 <!-- Bundle Metadata Panel -->
 <section id="metadata-panel" class="metadata-panel hidden">
-  <h3>Bundle Information</h3>
+  <div class="metadata-heading">
+    <h3>Bundle Information</h3>
+    <div class="capture-info">
+      <span class="metadata-label">Captured:</span>
+      <span id="health-time" class="capture-value">—</span>
+    </div>
+  </div>
   <div class="metadata-grid">
     <div class="metadata-item deployment">
       <span class="metadata-label">Deployment ID:</span>
@@ -48,14 +54,33 @@
   </div>
 </section>
 
+<!-- Network Panel -->
+<section id="network-panel" class="network-panel hidden">
+  <div class="network-header">
+    <h3>Network Information</h3>
+    <div id="network-health-badge" class="network-badge muted">No data</div>
+  </div>
+  <p id="network-health-message" class="network-message"></p>
+  <div id="network-alerts" class="network-alerts hidden"></div>
+  <div class="network-columns">
+    <div class="network-section">
+      <h4>Summary</h4>
+      <div id="network-summary" class="network-summary-list"></div>
+    </div>
+    <div class="network-section" id="network-regions-section">
+      <h4>DERP Regions</h4>
+      <div id="network-regions" class="network-region-list"></div>
+    </div>
+  </div>
+</section>
+
 <!-- Health Panel -->
 <section id="health-panel" class="health-panel hidden">
-  <div class="health-header">
-    <h3>System Health</h3>
-    <div id="health-time" class="health-time"></div>
-  </div>
+  <h3>System Health</h3>
   <div id="health-status-badge" class="health-badge"></div>
+  <div id="health-components" class="health-components hidden"></div>
   <ul id="health-warnings" class="health-warnings"></ul>
+  <div id="health-notes" class="health-notes hidden"></div>
 </section>
 
 <!-- Comparison Panel -->

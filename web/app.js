@@ -25,6 +25,72 @@ function isSafeURL(url) {
   }
 }
 
+function normalizeSeverityValue(severity, healthy) {
+  if (!severity) {
+    return healthy ? 'ok' : 'warning';
+  }
+  const value = String(severity).toLowerCase();
+  if (['ok', 'healthy', 'good', 'info', 'none'].includes(value)) {
+    return 'ok';
+  }
+  if (['warning', 'warn', 'minor', 'degraded', 'notice'].includes(value)) {
+    return 'warning';
+  }
+  if (['critical', 'severe', 'fatal'].includes(value)) {
+    return 'critical';
+  }
+  if (['error', 'failed', 'failure'].includes(value)) {
+    return 'error';
+  }
+  return healthy ? 'ok' : 'warning';
+}
+
+function severityLabel(severity, healthy) {
+  if (healthy) return 'Healthy';
+  if (!severity) return 'Issues detected';
+  const value = String(severity).toLowerCase();
+  if (['warning', 'warn', 'minor', 'degraded', 'notice'].includes(value)) {
+    return 'Warnings detected';
+  }
+  if (['critical', 'severe', 'fatal'].includes(value)) {
+    return 'Critical issues';
+  }
+  if (['error', 'failed', 'failure'].includes(value)) {
+    return 'Errors detected';
+  }
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function formatBooleanStatus(value, labels = {}) {
+  if (typeof value === 'boolean') {
+    return value ? (labels.trueText || 'Yes') : (labels.falseText || 'No');
+  }
+  return labels.unknownText || 'Unknown';
+}
+
+function appendSummaryRow(container, label, text, tooltip) {
+  if (!container || (!text && text !== 0 && text !== false)) {
+    return;
+  }
+  const item = document.createElement('div');
+  item.className = 'network-summary-item';
+
+  const labelEl = document.createElement('span');
+  labelEl.className = 'network-summary-label';
+  labelEl.textContent = label;
+
+  const valueEl = document.createElement('span');
+  valueEl.className = 'network-summary-value';
+  valueEl.textContent = String(text);
+  if (tooltip) {
+    valueEl.title = tooltip;
+  }
+
+  item.appendChild(labelEl);
+  item.appendChild(valueEl);
+  container.appendChild(item);
+}
+
 async function fetchBundles() {
   const res = await fetch('/api/bundles');
   const bundles = await res.json();
@@ -108,14 +174,28 @@ function updatePrometheusButton(bundles) {
 
 function displayBundleMetadata(bundle) {
   const panel = document.getElementById('metadata-panel');
+  const capturedEl = document.getElementById('health-time');
   if (!bundle.metadata) {
     panel.classList.add('hidden');
+    renderNetworkPanel(null);
+    if (capturedEl) capturedEl.textContent = '—';
     return;
   }
   
   panel.classList.remove('hidden');
   const metadata = bundle.metadata;
   currentBundleMetadata = metadata;
+  renderNetworkPanel(metadata.network);
+
+  if (capturedEl) {
+    let captureText = '—';
+    if (metadata.healthStatus?.timestamp) {
+      captureText = new Date(metadata.healthStatus.timestamp).toLocaleString();
+    } else if (bundle.created) {
+      captureText = new Date(bundle.created).toLocaleString();
+    }
+    capturedEl.textContent = captureText;
+  }
   
   // Display deployment ID
   const deploymentEl = document.getElementById('deployment-id');
@@ -287,6 +367,268 @@ function displayBundleMetadata(bundle) {
   renderHealthStatus(metadata.healthStatus);
 }
 
+function renderNetworkPanel(network) {
+  const panel = document.getElementById('network-panel');
+  if (!panel) return;
+
+  const badge = document.getElementById('network-health-badge');
+  const messageEl = document.getElementById('network-health-message');
+  const alertsEl = document.getElementById('network-alerts');
+  const summaryEl = document.getElementById('network-summary');
+  const regionsEl = document.getElementById('network-regions');
+  const regionsSection = document.getElementById('network-regions-section');
+  const interfacesEl = document.getElementById('network-interfaces');
+  const interfacesSection = document.getElementById('network-interfaces-section');
+
+  if (!network) {
+    panel.classList.add('hidden');
+    if (badge) {
+      badge.className = 'network-badge muted';
+      badge.textContent = 'No data';
+    }
+    if (messageEl) {
+      messageEl.textContent = '';
+      messageEl.style.display = 'none';
+    }
+    if (alertsEl) {
+      alertsEl.innerHTML = '';
+      alertsEl.classList.add('hidden');
+    }
+    if (summaryEl) summaryEl.innerHTML = '';
+    if (regionsEl) regionsEl.innerHTML = '';
+    if (regionsSection) regionsSection.classList.add('hidden');
+    if (interfacesEl) interfacesEl.innerHTML = '';
+    if (interfacesSection) interfacesSection.classList.add('hidden');
+    return;
+  }
+
+  panel.classList.remove('hidden');
+
+  if (badge) {
+    if (network.health) {
+      const severity = normalizeSeverityValue(network.health.severity, network.health.healthy);
+      badge.className = `health-badge ${severity}`;
+      let icon = '⚠️';
+      if (severity === 'ok') {
+        icon = '✅';
+      } else if (severity === 'error' || severity === 'critical') {
+        icon = '❌';
+      }
+      const label = severity === 'ok'
+        ? (network.health.healthy ? 'All systems operational' : 'No critical issues detected')
+        : severityLabel(network.health.severity, network.health.healthy);
+      badge.innerHTML = `<span class="alert-icon">${icon}</span><span class="badge-text">${label}</span>`;
+    } else {
+      badge.className = 'health-badge muted';
+      badge.innerHTML = '<span class="alert-icon">ℹ️</span><span class="badge-text">No data</span>';
+    }
+  }
+
+  if (messageEl) {
+    const message = network.health && network.health.message ? String(network.health.message) : '';
+    messageEl.textContent = message;
+    messageEl.style.display = message ? '' : 'none';
+  }
+
+  if (alertsEl) {
+    alertsEl.innerHTML = '';
+    const alerts = [];
+    if (Array.isArray(network.errors)) {
+      network.errors.forEach(msg => {
+        const value = String(msg || '').trim();
+        if (value) alerts.push({ type: 'error', text: value });
+      });
+    }
+    if (Array.isArray(network.warnings)) {
+      network.warnings.forEach(msg => {
+        const value = String(msg || '').trim();
+        if (value) alerts.push({ type: 'warning', text: value });
+      });
+    }
+    if (alerts.length > 0) {
+      alerts.forEach(alert => {
+        const item = document.createElement('div');
+        item.className = `network-alert ${alert.type}`;
+        item.textContent = alert.text;
+        alertsEl.appendChild(item);
+      });
+      alertsEl.classList.remove('hidden');
+    } else {
+      alertsEl.classList.add('hidden');
+    }
+  }
+
+  if (summaryEl) {
+    summaryEl.innerHTML = '';
+    const usage = network.usage || {};
+
+    if ('workspaceProxy' in usage || usage.workspaceProxyReason) {
+      appendSummaryRow(
+        summaryEl,
+        'Workspace Proxy',
+        formatBooleanStatus(usage.workspaceProxy, { trueText: 'Enforced', falseText: 'Not enforced', unknownText: 'Unknown' }),
+        usage.workspaceProxyReason || ''
+      );
+    }
+    if ('directConnectionsDisabled' in usage) {
+      appendSummaryRow(
+        summaryEl,
+        'Direct Connections',
+        formatBooleanStatus(usage.directConnectionsDisabled, { trueText: 'Disabled', falseText: 'Allowed', unknownText: 'Unknown' })
+      );
+    }
+    if ('usesStun' in usage) {
+      appendSummaryRow(
+        summaryEl,
+        'STUN Connectivity',
+        formatBooleanStatus(usage.usesStun, { trueText: 'Successful', falseText: 'Failed', unknownText: 'Unknown' })
+      );
+    }
+    if ('usesEmbeddedDerp' in usage || usage.embeddedDerpRegion) {
+      let value = formatBooleanStatus(usage.usesEmbeddedDerp);
+      if (usage.embeddedDerpRegion) {
+        value = `${value}${value ? ' ' : ''}(${usage.embeddedDerpRegion})`.trim();
+      }
+      appendSummaryRow(summaryEl, 'Embedded DERP', value);
+    }
+    if (usage.preferredDerp) {
+      appendSummaryRow(summaryEl, 'Preferred DERP', usage.preferredDerp);
+    }
+    if ('udp' in usage) {
+      appendSummaryRow(summaryEl, 'UDP Support', formatBooleanStatus(usage.udp));
+    }
+    if ('ipv4' in usage) {
+      appendSummaryRow(summaryEl, 'IPv4 Support', formatBooleanStatus(usage.ipv4));
+    }
+    if ('ipv4CanSend' in usage) {
+      appendSummaryRow(summaryEl, 'IPv4 Outbound', formatBooleanStatus(usage.ipv4CanSend));
+    }
+    if ('ipv6' in usage) {
+      appendSummaryRow(summaryEl, 'IPv6 Support', formatBooleanStatus(usage.ipv6));
+    }
+    if ('ipv6CanSend' in usage) {
+      appendSummaryRow(summaryEl, 'IPv6 Outbound', formatBooleanStatus(usage.ipv6CanSend));
+    }
+    if ('osHasIpv6' in usage) {
+      appendSummaryRow(summaryEl, 'OS IPv6 Support', formatBooleanStatus(usage.osHasIpv6));
+    }
+    if ('icmpv4' in usage) {
+      appendSummaryRow(summaryEl, 'ICMPv4', formatBooleanStatus(usage.icmpv4, { trueText: 'Available', falseText: 'Unavailable', unknownText: 'Unknown' }));
+    }
+    if ('mappingVariesByDestIp' in usage) {
+      appendSummaryRow(summaryEl, 'NAT Mapping Varies', formatBooleanStatus(usage.mappingVariesByDestIp, { trueText: 'Yes', falseText: 'No', unknownText: 'Unknown' }));
+    }
+    if ('hairPinning' in usage) {
+      appendSummaryRow(summaryEl, 'Hairpinning', formatBooleanStatus(usage.hairPinning, { trueText: 'Supported', falseText: 'Not supported', unknownText: 'Unknown' }));
+    }
+    if ('upnp' in usage) {
+      appendSummaryRow(summaryEl, 'UPnP', formatBooleanStatus(usage.upnp, { trueText: 'Available', falseText: 'Unavailable', unknownText: 'Unknown' }));
+    }
+    if ('pmp' in usage) {
+      appendSummaryRow(summaryEl, 'NAT-PMP', formatBooleanStatus(usage.pmp, { trueText: 'Available', falseText: 'Unavailable', unknownText: 'Unknown' }));
+    }
+    if ('pcp' in usage) {
+      appendSummaryRow(summaryEl, 'PCP', formatBooleanStatus(usage.pcp, { trueText: 'Available', falseText: 'Unavailable', unknownText: 'Unknown' }));
+    }
+    if ('captivePortal' in usage) {
+      const portal = typeof usage.captivePortal === 'string' ? usage.captivePortal.trim() : '';
+      appendSummaryRow(summaryEl, 'Captive Portal', portal || 'None detected');
+    }
+    if (usage.globalV4) {
+      appendSummaryRow(summaryEl, 'Global IPv4', usage.globalV4);
+    }
+    if (usage.globalV6) {
+      appendSummaryRow(summaryEl, 'Global IPv6', usage.globalV6);
+    }
+    if (Array.isArray(network.netcheckLogs) && network.netcheckLogs.length) {
+      appendSummaryRow(summaryEl, 'Netcheck Logs', `${network.netcheckLogs.length} lines`);
+    }
+
+    if (!summaryEl.childElementCount) {
+      const empty = document.createElement('div');
+      empty.className = 'network-empty';
+      empty.textContent = 'No summary data available.';
+      empty.style.gridColumn = '1 / -1';
+      summaryEl.appendChild(empty);
+    }
+  }
+
+  if (regionsEl && regionsSection) {
+    regionsEl.innerHTML = '';
+    const regions = Array.isArray(network.regions) ? network.regions : [];
+    if (regions.length > 0) {
+      regionsSection.classList.remove('hidden');
+      regions.forEach(region => {
+        const card = document.createElement('div');
+        card.className = `network-region ${region.healthy ? 'ok' : 'issue'}`;
+
+        const title = document.createElement('div');
+        title.className = 'network-region-title';
+        title.textContent = region.name || region.code || (region.regionId ? `Region ${region.regionId}` : 'DERP Region');
+        card.appendChild(title);
+
+        const metaParts = [];
+        if (region.severity) {
+          metaParts.push(severityLabel(region.severity, region.healthy));
+        }
+        if (typeof region.latencyMs === 'number') {
+          metaParts.push(`${region.latencyMs.toFixed(2)} ms`);
+        }
+        if (region.embeddedRelay) {
+          metaParts.push('Embedded');
+        }
+        if (typeof region.usesWebsocket === 'boolean') {
+          metaParts.push(region.usesWebsocket ? 'WebSocket' : 'UDP/TCP');
+        }
+        if (typeof region.canExchangeMessages === 'boolean') {
+          metaParts.push(region.canExchangeMessages ? 'Message exchange OK' : 'Cannot exchange messages');
+        }
+
+        if (metaParts.length > 0) {
+          const meta = document.createElement('div');
+          meta.className = 'network-region-meta';
+          meta.textContent = metaParts.join(' • ');
+          card.appendChild(meta);
+        }
+
+        const detailItems = [];
+        if (Array.isArray(region.errors)) {
+          region.errors.forEach(msg => {
+            const value = String(msg || '').trim();
+            if (value) detailItems.push({ type: 'error', text: value });
+          });
+        }
+        if (Array.isArray(region.warnings)) {
+          region.warnings.forEach(msg => {
+            const value = String(msg || '').trim();
+            if (value) detailItems.push({ type: 'warning', text: value });
+          });
+        }
+
+        if (detailItems.length > 0) {
+          const list = document.createElement('ul');
+          detailItems.forEach(item => {
+            const li = document.createElement('li');
+            li.textContent = item.text;
+            li.classList.add(item.type);
+            list.appendChild(li);
+          });
+          card.appendChild(list);
+        }
+
+        regionsEl.appendChild(card);
+      });
+    } else {
+      regionsSection.classList.add('hidden');
+    }
+  }
+
+  if (interfacesEl && interfacesSection) {
+    interfacesEl.innerHTML = '';
+    interfacesSection.classList.add('hidden');
+  }
+}
+
 function renderHealthStatus(status) {
   const panel = document.getElementById('health-panel');
   if (!panel) return;
@@ -294,6 +636,8 @@ function renderHealthStatus(status) {
   const badge = document.getElementById('health-status-badge');
   const timeEl = document.getElementById('health-time');
   const warningsEl = document.getElementById('health-warnings');
+  const componentsEl = document.getElementById('health-components');
+  const notesEl = document.getElementById('health-notes');
 
   // run "window.__HEALTH_PANEL_FORCE__ = 'show'" in console to show health data
   const override = healthPanelOverride;
@@ -308,8 +652,11 @@ function renderHealthStatus(status) {
   }
 
   const severity = ((status && status.severity) || '').toLowerCase();
-  const warnings = status?.warnings || [];
-  const shouldShow = override === 'show' || !status?.healthy || severity !== 'ok' || warnings.length > 0;
+  const hasComponents = Array.isArray(status?.components) && status.components.length > 0;
+  const hasNotes = Array.isArray(status?.notes) && status.notes.length > 0;
+  const fallbackWarningsRaw = Array.isArray(status?.warnings) ? status.warnings : [];
+  const hasFallbackWarnings = fallbackWarningsRaw.some(item => String(item || '').trim() !== '');
+  const shouldShow = override === 'show' || !status?.healthy || severity !== 'ok' || hasFallbackWarnings || hasComponents || hasNotes;
   if (!shouldShow) {
     panel.classList.add('hidden');
     return;
@@ -318,29 +665,115 @@ function renderHealthStatus(status) {
   panel.classList.remove('hidden');
 
   if (timeEl) {
-    timeEl.textContent = status?.timestamp ? `Captured ${new Date(status.timestamp).toLocaleString()}` : '';
+    timeEl.textContent = status?.timestamp ? new Date(status.timestamp).toLocaleString() : '';
+  }
+
+  let severityClass = normalizeSeverityValue(status?.severity, status?.healthy);
+  const components = Array.isArray(status?.components) ? status.components : [];
+  const componentSeverities = components.map(comp => normalizeSeverityValue(comp.severity, comp.healthy));
+  const componentsHaveIssues = componentSeverities.some(sev => sev !== 'ok') || components.some(comp => (comp.messages || []).length > 0 || comp.dismissed);
+  const notes = Array.isArray(status?.notes) ? status.notes : [];
+  const fallbackWarnings = fallbackWarningsRaw.filter(item => String(item || '').trim() !== '');
+
+  if (severityClass === 'ok' && (componentsHaveIssues || fallbackWarnings.length > 0 || notes.length > 0 || !status?.healthy)) {
+    severityClass = 'warning';
   }
 
   if (badge) {
-    const normalized = severity === 'warn' ? 'warning' : severity;
-    const severityClass = status?.healthy && override !== 'show' ? 'ok' : (normalized || 'warning');
     badge.className = `health-badge ${severityClass}`;
-    if (status?.healthy && override !== 'show') {
-      badge.innerHTML = '<span class="alert-icon">✅</span> All systems healthy';
+    let icon = '⚠️';
+    if (severityClass === 'ok') {
+      icon = '✅';
+    } else if (severityClass === 'error' || severityClass === 'critical') {
+      icon = '❌';
+    }
+    const label = severityClass === 'ok'
+      ? (status?.healthy ? 'All systems appear healthy' : 'No critical issues detected')
+      : severityLabel(status?.severity, status?.healthy);
+    badge.innerHTML = `<span class="alert-icon">${icon}</span> ${label}`;
+  }
+
+  if (componentsEl) {
+    componentsEl.innerHTML = '';
+    if (!components.length) {
+      componentsEl.classList.add('hidden');
     } else {
-      const label = normalized ? normalized.charAt(0).toUpperCase() + normalized.slice(1) : 'Issue';
-      badge.innerHTML = `<span class="alert-icon">⚠️</span> Severity: ${label}`;
+      componentsEl.classList.remove('hidden');
+      components.forEach(comp => {
+        const compSeverity = normalizeSeverityValue(comp.severity, comp.healthy);
+        const card = document.createElement('div');
+        card.className = `health-card ${compSeverity}`;
+
+        const header = document.createElement('div');
+        header.className = 'health-card-header';
+        header.textContent = comp.name || 'Component';
+        card.appendChild(header);
+
+        const statusLine = document.createElement('div');
+        statusLine.className = 'health-card-status';
+        if (compSeverity === 'ok') {
+          statusLine.textContent = comp.healthy ? 'Healthy' : 'Issue detected';
+        } else {
+          statusLine.textContent = severityLabel(comp.severity, comp.healthy);
+        }
+        card.appendChild(statusLine);
+
+        if (comp.dismissed) {
+          const tag = document.createElement('div');
+          tag.className = 'health-card-tag';
+          tag.textContent = 'Dismissed';
+          card.appendChild(tag);
+        }
+
+        if (Array.isArray(comp.messages) && comp.messages.length) {
+          const list = document.createElement('ul');
+          list.className = 'health-card-messages';
+          comp.messages.forEach(msg => {
+            const li = document.createElement('li');
+            li.textContent = msg;
+            list.appendChild(li);
+          });
+          card.appendChild(list);
+        }
+
+        componentsEl.appendChild(card);
+      });
+    }
+  }
+
+  if (notesEl) {
+    notesEl.innerHTML = '';
+    if (!notes.length) {
+      notesEl.classList.add('hidden');
+    } else {
+      notesEl.classList.remove('hidden');
+      notes.forEach(note => {
+        const div = document.createElement('div');
+        div.className = 'health-note';
+        div.textContent = note;
+        notesEl.appendChild(div);
+      });
     }
   }
 
   if (warningsEl) {
     warningsEl.innerHTML = '';
-    const list = warnings.length > 0 ? warnings : ['No specific warning messages provided.'];
-    list.forEach(msg => {
+    const shouldShowWarnings = componentSeverities.length === 0 && fallbackWarnings.length > 0;
+    if (shouldShowWarnings) {
+      fallbackWarnings.forEach(msg => {
+        const li = document.createElement('li');
+        li.textContent = msg;
+        warningsEl.appendChild(li);
+      });
+      warningsEl.classList.remove('hidden');
+    } else if (componentSeverities.length === 0) {
       const li = document.createElement('li');
-      li.textContent = msg;
+      li.textContent = 'No specific warning messages provided.';
       warningsEl.appendChild(li);
-    });
+      warningsEl.classList.remove('hidden');
+    } else {
+      warningsEl.classList.add('hidden');
+    }
   }
 }
 

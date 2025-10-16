@@ -142,13 +142,87 @@ type BundleMetadata struct {
 	Version           string          `json:"version,omitempty"`
 	DashboardURL      string          `json:"dashboardUrl,omitempty"`
 	HealthStatus      *HealthStatus   `json:"healthStatus,omitempty"`
+	Network           *NetworkInfo    `json:"network,omitempty"`
 }
 
 type HealthStatus struct {
-	Healthy   bool       `json:"healthy"`
-	Severity  string     `json:"severity"`
-	Warnings  []string   `json:"warnings,omitempty"`
-	Timestamp *time.Time `json:"timestamp,omitempty"`
+	Healthy    bool              `json:"healthy"`
+	Severity   string            `json:"severity"`
+	Warnings   []string          `json:"warnings,omitempty"`
+	Components []HealthComponent `json:"components,omitempty"`
+	Notes      []string          `json:"notes,omitempty"`
+	Timestamp  *time.Time        `json:"timestamp,omitempty"`
+}
+
+type HealthComponent struct {
+	Name      string   `json:"name"`
+	Healthy   bool     `json:"healthy"`
+	Severity  string   `json:"severity,omitempty"`
+	Messages  []string `json:"messages,omitempty"`
+	Dismissed bool     `json:"dismissed,omitempty"`
+}
+
+type NetworkInfo struct {
+	Health         *NetworkHealthSummary  `json:"health,omitempty"`
+	Usage          *NetworkUsageSummary   `json:"usage,omitempty"`
+	Warnings       []string               `json:"warnings,omitempty"`
+	Errors         []string               `json:"errors,omitempty"`
+	Regions        []NetworkRegionStatus  `json:"regions,omitempty"`
+	Interfaces     []NetworkInterfaceInfo `json:"interfaces,omitempty"`
+	HostnameSuffix string                 `json:"hostnameSuffix,omitempty"`
+	NetcheckLogs   []string               `json:"netcheckLogs,omitempty"`
+}
+
+type NetworkHealthSummary struct {
+	Healthy  bool   `json:"healthy"`
+	Severity string `json:"severity,omitempty"`
+	Message  string `json:"message,omitempty"`
+}
+
+type NetworkUsageSummary struct {
+	UsesSTUN                  *bool   `json:"usesStun,omitempty"`
+	UsesEmbeddedDERP          *bool   `json:"usesEmbeddedDerp,omitempty"`
+	EmbeddedDERPRegion        string  `json:"embeddedDerpRegion,omitempty"`
+	PreferredDERP             string  `json:"preferredDerp,omitempty"`
+	DirectConnectionsDisabled *bool   `json:"directConnectionsDisabled,omitempty"`
+	ForceWebsockets           *bool   `json:"forceWebsockets,omitempty"`
+	WorkspaceProxy            *bool   `json:"workspaceProxy,omitempty"`
+	WorkspaceProxyReason      string  `json:"workspaceProxyReason,omitempty"`
+	UDP                       *bool   `json:"udp,omitempty"`
+	IPv4                      *bool   `json:"ipv4,omitempty"`
+	IPv6                      *bool   `json:"ipv6,omitempty"`
+	IPv4CanSend               *bool   `json:"ipv4CanSend,omitempty"`
+	IPv6CanSend               *bool   `json:"ipv6CanSend,omitempty"`
+	OSHasIPv6                 *bool   `json:"osHasIpv6,omitempty"`
+	ICMPv4                    *bool   `json:"icmpv4,omitempty"`
+	MappingVariesByDestIP     *bool   `json:"mappingVariesByDestIp,omitempty"`
+	HairPinning               *bool   `json:"hairPinning,omitempty"`
+	UPnP                      *bool   `json:"upnp,omitempty"`
+	PMP                       *bool   `json:"pmp,omitempty"`
+	PCP                       *bool   `json:"pcp,omitempty"`
+	CaptivePortal             *string `json:"captivePortal,omitempty"`
+	GlobalV4                  string  `json:"globalV4,omitempty"`
+	GlobalV6                  string  `json:"globalV6,omitempty"`
+}
+
+type NetworkRegionStatus struct {
+	RegionID            int      `json:"regionId,omitempty"`
+	Code                string   `json:"code,omitempty"`
+	Name                string   `json:"name,omitempty"`
+	Healthy             bool     `json:"healthy"`
+	Severity            string   `json:"severity,omitempty"`
+	Warnings            []string `json:"warnings,omitempty"`
+	Errors              []string `json:"errors,omitempty"`
+	UsesWebsocket       *bool    `json:"usesWebsocket,omitempty"`
+	CanExchangeMessages *bool    `json:"canExchangeMessages,omitempty"`
+	EmbeddedRelay       bool     `json:"embeddedRelay"`
+	LatencyMS           *float64 `json:"latencyMs,omitempty"`
+}
+
+type NetworkInterfaceInfo struct {
+	Name      string   `json:"name"`
+	MTU       int      `json:"mtu"`
+	Addresses []string `json:"addresses,omitempty"`
 }
 
 type LoadResult struct {
@@ -1928,7 +2002,603 @@ func parseBundleMetadata(zr *zip.Reader, metadata *BundleMetadata, warnings *[]s
 		}
 	}
 
+	parseNetworkInfo(zr, metadata, warnings)
+
 	return capturedAt
+}
+
+func parseNetworkInfo(zr *zip.Reader, metadata *BundleMetadata, warnings *[]string) {
+	if metadata == nil {
+		return
+	}
+
+	type connectionRegionMeta struct {
+		Code     string
+		Name     string
+		Embedded bool
+		RegionID int
+	}
+
+	var (
+		info           NetworkInfo
+		dataFound      bool
+		warnSet        = map[string]struct{}{}
+		errSet         = map[string]struct{}{}
+		connRegions    = map[int]connectionRegionMeta{}
+		hostnameSuffix string
+		haveConnInfo   bool
+		forceWS        bool
+		disableDirect  bool
+		workspaceNotes []string
+	)
+
+	shouldPromote := func(kind, msg string) bool {
+		trimmed := strings.TrimSpace(msg)
+		if trimmed == "" {
+			return false
+		}
+		lower := strings.ToLower(trimmed)
+		if strings.Contains(lower, "probe stun:") {
+			return false
+		}
+		if kind == "warning" && strings.HasPrefix(lower, "derp region") {
+			return false
+		}
+		return true
+	}
+
+	addToSet := func(set map[string]struct{}, msg, kind string) {
+		msg = strings.TrimSpace(msg)
+		if msg == "" || set == nil {
+			return
+		}
+		if !shouldPromote(kind, msg) {
+			return
+		}
+		set[msg] = struct{}{}
+	}
+
+	addWarning := func(msg string) {
+		addToSet(warnSet, msg, "warning")
+	}
+
+	addError := func(msg string) {
+		addToSet(errSet, msg, "error")
+	}
+
+	boolPtr := func(v bool) *bool {
+		val := v
+		return &val
+	}
+
+	floatPtr := func(v float64) *float64 {
+		val := v
+		return &val
+	}
+
+	ensureUsage := func(info *NetworkInfo) *NetworkUsageSummary {
+		if info.Usage == nil {
+			info.Usage = &NetworkUsageSummary{}
+		}
+		return info.Usage
+	}
+
+	// connection_info.json
+	if f := findSibling(zr, "network/connection_info.json"); f != nil {
+		dataFound = true
+		content, err := readZipFile(f)
+		if err != nil {
+			msg := fmt.Sprintf("failed to read network/connection_info.json: %v", err)
+			addError(msg)
+		} else {
+			var payload struct {
+				DerpMap struct {
+					Regions map[string]struct {
+						EmbeddedRelay bool   `json:"EmbeddedRelay"`
+						RegionID      int    `json:"RegionID"`
+						RegionCode    string `json:"RegionCode"`
+						RegionName    string `json:"RegionName"`
+					} `json:"Regions"`
+				} `json:"derp_map"`
+				DerpForceWebsockets      bool   `json:"derp_force_websockets"`
+				DisableDirectConnections bool   `json:"disable_direct_connections"`
+				HostnameSuffix           string `json:"hostname_suffix"`
+			}
+			if err := json.Unmarshal(content, &payload); err != nil {
+				msg := fmt.Sprintf("failed to parse network/connection_info.json: %v", err)
+				addError(msg)
+			} else {
+				haveConnInfo = true
+				forceWS = payload.DerpForceWebsockets
+				disableDirect = payload.DisableDirectConnections
+				hostnameSuffix = strings.TrimSpace(payload.HostnameSuffix)
+
+				usage := ensureUsage(&info)
+				usage.ForceWebsockets = boolPtr(forceWS)
+				usage.DirectConnectionsDisabled = boolPtr(disableDirect)
+				usage.WorkspaceProxy = boolPtr(disableDirect)
+				if disableDirect {
+					workspaceNotes = append(workspaceNotes, "Direct connections are disabled (disable_direct_connections=true)")
+				}
+
+				for _, region := range payload.DerpMap.Regions {
+					connRegions[region.RegionID] = connectionRegionMeta{
+						Code:     strings.TrimSpace(region.RegionCode),
+						Name:     strings.TrimSpace(region.RegionName),
+						Embedded: region.EmbeddedRelay,
+						RegionID: region.RegionID,
+					}
+				}
+			}
+		}
+	}
+
+	var (
+		stunSeen        bool
+		stunSuccessful  bool
+		embeddedInUse   bool
+		preferredDERP   string
+		preferredRegion string
+	)
+
+	// netcheck.json
+	if f := findSibling(zr, "network/netcheck.json"); f != nil {
+		dataFound = true
+		content, err := readZipFile(f)
+		if err != nil {
+			msg := fmt.Sprintf("failed to read network/netcheck.json: %v", err)
+			addError(msg)
+		} else {
+			var payload struct {
+				Severity string `json:"severity"`
+				Warnings []any  `json:"warnings"`
+				Healthy  bool   `json:"healthy"`
+				Regions  map[string]struct {
+					Healthy  bool   `json:"healthy"`
+					Severity string `json:"severity"`
+					Warnings []any  `json:"warnings"`
+					Region   struct {
+						EmbeddedRelay bool   `json:"EmbeddedRelay"`
+						RegionID      int    `json:"RegionID"`
+						RegionCode    string `json:"RegionCode"`
+						RegionName    string `json:"RegionName"`
+					} `json:"region"`
+					NodeReports []struct {
+						Healthy             bool       `json:"healthy"`
+						Severity            string     `json:"severity"`
+						Warnings            []any      `json:"warnings"`
+						UsesWebsocket       bool       `json:"uses_websocket"`
+						CanExchangeMessages bool       `json:"can_exchange_messages"`
+						ClientErrs          []any      `json:"client_errs"`
+						ClientLogs          [][]string `json:"client_logs"`
+						Stun                struct {
+							Enabled *bool `json:"Enabled"`
+							CanSTUN *bool `json:"CanSTUN"`
+							Error   any   `json:"Error"`
+						} `json:"stun"`
+					} `json:"node_reports"`
+				} `json:"regions"`
+				Netcheck struct {
+					UDP                   *bool                  `json:"UDP"`
+					IPv4                  *bool                  `json:"IPv4"`
+					IPv6                  *bool                  `json:"IPv6"`
+					IPv4CanSend           *bool                  `json:"IPv4CanSend"`
+					IPv6CanSend           *bool                  `json:"IPv6CanSend"`
+					OSHasIPv6             *bool                  `json:"OSHasIPv6"`
+					ICMPv4                *bool                  `json:"ICMPv4"`
+					MappingVariesByDestIP *bool                  `json:"MappingVariesByDestIP"`
+					HairPinning           *bool                  `json:"HairPinning"`
+					UPnP                  *bool                  `json:"UPnP"`
+					PMP                   *bool                  `json:"PMP"`
+					PCP                   *bool                  `json:"PCP"`
+					CaptivePortal         any                    `json:"CaptivePortal"`
+					PreferredDERP         *int                   `json:"PreferredDERP"`
+					RegionLatency         map[string]json.Number `json:"RegionLatency"`
+					RegionV4Latency       map[string]json.Number `json:"RegionV4Latency"`
+					RegionV6Latency       map[string]json.Number `json:"RegionV6Latency"`
+					GlobalV4              string                 `json:"GlobalV4"`
+					GlobalV6              string                 `json:"GlobalV6"`
+				} `json:"netcheck"`
+				NetcheckLogs []string `json:"netcheck_logs"`
+			}
+			if err := json.Unmarshal(content, &payload); err != nil {
+				msg := fmt.Sprintf("failed to parse network/netcheck.json: %v", err)
+				addError(msg)
+			} else {
+				info.Health = &NetworkHealthSummary{
+					Healthy:  payload.Healthy,
+					Severity: strings.ToLower(strings.TrimSpace(payload.Severity)),
+				}
+				if payload.Healthy {
+					info.Health.Message = "Netcheck reports healthy connectivity"
+				} else if payload.Severity != "" {
+					info.Health.Message = fmt.Sprintf("Netcheck severity: %s", payload.Severity)
+				} else {
+					info.Health.Message = "Netcheck reported connectivity issues"
+				}
+
+				for _, warn := range flattenMessages(payload.Warnings) {
+					addWarning(warn)
+				}
+
+				if len(payload.NetcheckLogs) > 0 {
+					if len(payload.NetcheckLogs) > 50 {
+						info.NetcheckLogs = append([]string(nil), payload.NetcheckLogs[:50]...)
+					} else {
+						info.NetcheckLogs = append([]string(nil), payload.NetcheckLogs...)
+					}
+				}
+
+				usage := ensureUsage(&info)
+				if payload.Netcheck.UDP != nil {
+					usage.UDP = boolPtr(*payload.Netcheck.UDP)
+				}
+				if payload.Netcheck.IPv4 != nil {
+					usage.IPv4 = boolPtr(*payload.Netcheck.IPv4)
+				}
+				if payload.Netcheck.IPv6 != nil {
+					usage.IPv6 = boolPtr(*payload.Netcheck.IPv6)
+				}
+				if payload.Netcheck.IPv4CanSend != nil {
+					usage.IPv4CanSend = boolPtr(*payload.Netcheck.IPv4CanSend)
+				}
+				if payload.Netcheck.IPv6CanSend != nil {
+					usage.IPv6CanSend = boolPtr(*payload.Netcheck.IPv6CanSend)
+				}
+				if payload.Netcheck.OSHasIPv6 != nil {
+					usage.OSHasIPv6 = boolPtr(*payload.Netcheck.OSHasIPv6)
+				}
+				if payload.Netcheck.ICMPv4 != nil {
+					usage.ICMPv4 = boolPtr(*payload.Netcheck.ICMPv4)
+				}
+				if payload.Netcheck.MappingVariesByDestIP != nil {
+					usage.MappingVariesByDestIP = boolPtr(*payload.Netcheck.MappingVariesByDestIP)
+				}
+				if payload.Netcheck.HairPinning != nil {
+					usage.HairPinning = boolPtr(*payload.Netcheck.HairPinning)
+				}
+				if payload.Netcheck.UPnP != nil {
+					usage.UPnP = boolPtr(*payload.Netcheck.UPnP)
+				}
+				if payload.Netcheck.PMP != nil {
+					usage.PMP = boolPtr(*payload.Netcheck.PMP)
+				}
+				if payload.Netcheck.PCP != nil {
+					usage.PCP = boolPtr(*payload.Netcheck.PCP)
+				}
+				if payload.Netcheck.CaptivePortal != nil {
+					var cp string
+					switch v := payload.Netcheck.CaptivePortal.(type) {
+					case string:
+						cp = strings.TrimSpace(v)
+					case fmt.Stringer:
+						cp = strings.TrimSpace(v.String())
+					default:
+						cp = strings.TrimSpace(fmt.Sprint(v))
+					}
+					if cp == "" || strings.EqualFold(cp, "null") {
+						cp = "None detected"
+					}
+					usage.CaptivePortal = &cp
+				}
+				if payload.Netcheck.GlobalV4 != "" {
+					usage.GlobalV4 = payload.Netcheck.GlobalV4
+				}
+				if payload.Netcheck.GlobalV6 != "" {
+					usage.GlobalV6 = payload.Netcheck.GlobalV6
+				}
+
+				if payload.Netcheck.PreferredDERP != nil {
+					id := *payload.Netcheck.PreferredDERP
+					if id != 0 {
+						if meta, ok := connRegions[id]; ok {
+							preferredRegion = meta.Name
+							if preferredRegion == "" && meta.Code != "" {
+								preferredRegion = meta.Code
+							}
+							preferredDERP = fmt.Sprintf("%d", id)
+							if preferredRegion != "" {
+								preferredDERP = fmt.Sprintf("%d (%s)", id, preferredRegion)
+							}
+							if meta.Embedded {
+								embeddedInUse = true
+							}
+						} else {
+							preferredDERP = fmt.Sprintf("%d", id)
+							if reg, ok := payload.Regions[strconv.Itoa(id)]; ok {
+								if name := strings.TrimSpace(reg.Region.RegionName); name != "" {
+									if preferredRegion == "" {
+										preferredRegion = name
+									}
+									preferredDERP = fmt.Sprintf("%d (%s)", id, name)
+								}
+								if reg.Region.EmbeddedRelay {
+									embeddedInUse = true
+								}
+							}
+						}
+					}
+				}
+
+				latencyForRegion := func(key string) *float64 {
+					if payload.Netcheck.RegionLatency != nil {
+						if v, ok := payload.Netcheck.RegionLatency[key]; ok {
+							if ns, err := v.Int64(); err == nil {
+								ms := float64(ns) / 1e6
+								return floatPtr(ms)
+							}
+						}
+					}
+					if payload.Netcheck.RegionV4Latency != nil {
+						if v, ok := payload.Netcheck.RegionV4Latency[key]; ok {
+							if ns, err := v.Int64(); err == nil {
+								ms := float64(ns) / 1e6
+								return floatPtr(ms)
+							}
+						}
+					}
+					if payload.Netcheck.RegionV6Latency != nil {
+						if v, ok := payload.Netcheck.RegionV6Latency[key]; ok {
+							if ns, err := v.Int64(); err == nil {
+								ms := float64(ns) / 1e6
+								return floatPtr(ms)
+							}
+						}
+					}
+					return nil
+				}
+
+				for regionKey, region := range payload.Regions {
+					status := NetworkRegionStatus{
+						Healthy:  region.Healthy,
+						Severity: strings.ToLower(strings.TrimSpace(region.Severity)),
+					}
+					if region.Region.RegionID != 0 {
+						status.RegionID = region.Region.RegionID
+					} else if id, err := strconv.Atoi(regionKey); err == nil {
+						status.RegionID = id
+					}
+					status.Code = strings.TrimSpace(region.Region.RegionCode)
+					status.Name = strings.TrimSpace(region.Region.RegionName)
+					status.EmbeddedRelay = region.Region.EmbeddedRelay
+					if status.Name == "" && status.Code != "" {
+						status.Name = status.Code
+					}
+
+					if status.RegionID != 0 {
+						if meta, ok := connRegions[status.RegionID]; ok {
+							status.EmbeddedRelay = status.EmbeddedRelay || meta.Embedded
+							if status.Name == "" {
+								status.Name = meta.Name
+							}
+							if status.Code == "" {
+								status.Code = meta.Code
+							}
+						}
+					}
+
+					for _, warn := range flattenMessages(region.Warnings) {
+						addWarning(warn)
+					}
+
+					if lat := latencyForRegion(regionKey); lat != nil {
+						status.LatencyMS = lat
+					}
+
+					var (
+						seenWebsocket bool
+						websocketVal  bool
+						seenExchange  bool
+						exchangeVal   bool
+					)
+
+					for _, node := range region.NodeReports {
+						for _, warn := range flattenMessages(node.Warnings) {
+							addWarning(warn)
+							status.Warnings = append(status.Warnings, warn)
+						}
+
+						if node.UsesWebsocket {
+							websocketVal = true
+							seenWebsocket = true
+						} else if !seenWebsocket {
+							seenWebsocket = true
+							websocketVal = false
+						}
+
+						if node.CanExchangeMessages {
+							exchangeVal = true
+							seenExchange = true
+						} else if !seenExchange {
+							seenExchange = true
+							exchangeVal = false
+						}
+
+						if node.Stun.Enabled != nil {
+							stunSeen = true
+							if node.Stun.CanSTUN != nil {
+								if *node.Stun.CanSTUN {
+									stunSuccessful = true
+								}
+							}
+						}
+						if node.Stun.CanSTUN != nil {
+							stunSeen = true
+							if *node.Stun.CanSTUN {
+								stunSuccessful = true
+							}
+						}
+						if node.Stun.Error != nil {
+							text := strings.TrimSpace(fmt.Sprint(node.Stun.Error))
+							if text != "" && text != "[]" {
+								status.Errors = append(status.Errors, text)
+								addError(text)
+							}
+						}
+
+						for _, errVal := range node.ClientErrs {
+							text := strings.TrimSpace(fmt.Sprint(errVal))
+							if text == "" || text == "[]" {
+								continue
+							}
+							status.Errors = append(status.Errors, text)
+							addError(text)
+						}
+					}
+
+					if seenWebsocket {
+						status.UsesWebsocket = boolPtr(websocketVal)
+					}
+					if seenExchange {
+						status.CanExchangeMessages = boolPtr(exchangeVal)
+					}
+
+					if !status.Healthy {
+						desc := status.Name
+						if desc == "" && status.Code != "" {
+							desc = status.Code
+						}
+						if desc == "" && status.RegionID != 0 {
+							desc = fmt.Sprintf("DERP region %d", status.RegionID)
+						}
+						if desc != "" {
+							addWarning(fmt.Sprintf("DERP region %s reported issues", desc))
+						}
+					}
+
+					if len(status.Warnings) > 0 {
+						sort.Strings(status.Warnings)
+					} else {
+						status.Warnings = nil
+					}
+					if len(status.Errors) > 0 {
+						sort.Strings(status.Errors)
+					} else {
+						status.Errors = nil
+					}
+
+					info.Regions = append(info.Regions, status)
+				}
+			}
+		}
+	}
+
+	// interfaces.json
+	if f := findSibling(zr, "network/interfaces.json"); f != nil {
+		dataFound = true
+		content, err := readZipFile(f)
+		if err != nil {
+			msg := fmt.Sprintf("failed to read network/interfaces.json: %v", err)
+			addError(msg)
+		} else {
+			var payload struct {
+				Severity   string   `json:"severity"`
+				Warnings   []string `json:"warnings"`
+				Interfaces []struct {
+					Name      string   `json:"name"`
+					MTU       int      `json:"mtu"`
+					Addresses []string `json:"addresses"`
+				} `json:"interfaces"`
+			}
+			if err := json.Unmarshal(content, &payload); err != nil {
+				msg := fmt.Sprintf("failed to parse network/interfaces.json: %v", err)
+				addError(msg)
+			} else {
+				sev := strings.ToLower(strings.TrimSpace(payload.Severity))
+				if sev != "" && sev != "ok" {
+					addWarning(fmt.Sprintf("Interface report severity: %s", payload.Severity))
+				}
+				for _, warn := range payload.Warnings {
+					addWarning(warn)
+				}
+				for _, iface := range payload.Interfaces {
+					info.Interfaces = append(info.Interfaces, NetworkInterfaceInfo{
+						Name:      iface.Name,
+						MTU:       iface.MTU,
+						Addresses: append([]string(nil), iface.Addresses...),
+					})
+				}
+			}
+		}
+	}
+
+	if haveConnInfo && info.Usage != nil {
+		if embeddedInUse {
+			info.Usage.UsesEmbeddedDERP = boolPtr(true)
+		} else if len(connRegions) > 0 {
+			info.Usage.UsesEmbeddedDERP = boolPtr(false)
+		}
+	}
+	if preferredDERP != "" {
+		if info.Usage == nil {
+			info.Usage = &NetworkUsageSummary{}
+		}
+		info.Usage.PreferredDERP = preferredDERP
+		if embeddedInUse && preferredRegion != "" {
+			info.Usage.EmbeddedDERPRegion = preferredRegion
+		} else if embeddedInUse {
+			info.Usage.EmbeddedDERPRegion = preferredDERP
+		}
+	}
+	if info.Usage != nil && len(workspaceNotes) > 0 {
+		info.Usage.WorkspaceProxyReason = strings.Join(workspaceNotes, "; ")
+	}
+
+	if stunSeen {
+		if info.Usage == nil {
+			info.Usage = &NetworkUsageSummary{}
+		}
+		info.Usage.UsesSTUN = boolPtr(stunSuccessful)
+		if !stunSuccessful {
+			addWarning("STUN probes did not succeed")
+		}
+	}
+
+	if hostnameSuffix != "" {
+		info.HostnameSuffix = hostnameSuffix
+	}
+
+	if len(info.Regions) > 0 {
+		sort.Slice(info.Regions, func(i, j int) bool {
+			if info.Regions[i].Healthy != info.Regions[j].Healthy {
+				return !info.Regions[i].Healthy && info.Regions[j].Healthy
+			}
+			if info.Regions[i].Severity != info.Regions[j].Severity {
+				return info.Regions[i].Severity < info.Regions[j].Severity
+			}
+			return info.Regions[i].Name < info.Regions[j].Name
+		})
+	}
+
+	if len(info.Interfaces) > 0 {
+		sort.Slice(info.Interfaces, func(i, j int) bool {
+			return info.Interfaces[i].Name < info.Interfaces[j].Name
+		})
+	}
+
+	if len(info.NetcheckLogs) > 0 {
+		// Keep deterministic order, already in order but clone.
+		info.NetcheckLogs = append([]string(nil), info.NetcheckLogs...)
+	}
+
+	if len(warnSet) > 0 {
+		info.Warnings = make([]string, 0, len(warnSet))
+		for msg := range warnSet {
+			info.Warnings = append(info.Warnings, msg)
+		}
+		sort.Strings(info.Warnings)
+	}
+	if len(errSet) > 0 {
+		info.Errors = make([]string, 0, len(errSet))
+		for msg := range errSet {
+			info.Errors = append(info.Errors, msg)
+		}
+		sort.Strings(info.Errors)
+	}
+
+	if dataFound || len(info.Warnings) > 0 || len(info.Errors) > 0 {
+		metadata.Network = &info
+	}
 }
 
 func parseHealthReport(content []byte) (*HealthStatus, error) {
@@ -1967,6 +2637,159 @@ func parseHealthReport(content []byte) (*HealthStatus, error) {
 	if base.Time != "" {
 		if t, err := time.Parse(time.RFC3339Nano, base.Time); err == nil {
 			status.Timestamp = &t
+		}
+	}
+
+	if rawMap, ok := raw.(map[string]any); ok {
+		keys := make([]string, 0, len(rawMap))
+		for key := range rawMap {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		components := make([]HealthComponent, 0)
+		notes := make([]string, 0)
+
+		getBool := func(v any) bool {
+			switch b := v.(type) {
+			case bool:
+				return b
+			case string:
+				l := strings.ToLower(strings.TrimSpace(b))
+				return l == "true" || l == "1"
+			case float64:
+				return b != 0
+			}
+			return false
+		}
+
+		buildComponent := func(key string, value any) (*HealthComponent, string) {
+			m, ok := value.(map[string]any)
+			if !ok {
+				return nil, ""
+			}
+
+			comp := &HealthComponent{
+				Name:     humanizeKey(key),
+				Healthy:  true,
+				Severity: "",
+			}
+			if h, ok := m["healthy"]; ok {
+				comp.Healthy = getBool(h)
+			}
+			if sev, ok := m["severity"]; ok {
+				comp.Severity = strings.ToLower(strings.TrimSpace(fmt.Sprint(sev)))
+			}
+			if comp.Severity == "" && !comp.Healthy {
+				comp.Severity = "error"
+			}
+			if dismissed, ok := m["dismissed"].(bool); ok {
+				comp.Dismissed = dismissed
+			}
+
+			messages := make([]string, 0)
+			if warns, ok := m["warnings"]; ok {
+				messages = append(messages, flattenMessages(warns)...)
+			}
+			if errs, ok := m["errors"]; ok {
+				messages = append(messages, flattenMessages(errs)...)
+			}
+			if statusMap, ok := m["status"].(map[string]any); ok {
+				if s := strings.TrimSpace(fmt.Sprint(statusMap["status"])); s != "" && strings.ToLower(s) != "ok" {
+					messages = append(messages, fmt.Sprintf("Status: %s", humanizeKey(s)))
+				}
+				if rep, ok := statusMap["report"].(map[string]any); ok {
+					messages = append(messages, flattenMessages(rep["errors"])...)
+					messages = append(messages, flattenMessages(rep["warnings"])...)
+				}
+			}
+
+			if key == "workspace_proxy" {
+				if proxies, ok := m["workspace_proxies"].(map[string]any); ok {
+					if regions, ok := proxies["regions"].([]any); ok {
+						for _, region := range regions {
+							rm, ok := region.(map[string]any)
+							if !ok {
+								continue
+							}
+							if getBool(rm["healthy"]) {
+								continue
+							}
+							name := strings.TrimSpace(fmt.Sprint(rm["display_name"]))
+							if name == "" {
+								name = strings.TrimSpace(fmt.Sprint(rm["name"]))
+							}
+							statusMsg := ""
+							if statusMap, ok := rm["status"].(map[string]any); ok {
+								if s := strings.TrimSpace(fmt.Sprint(statusMap["status"])); s != "" && strings.ToLower(s) != "ok" {
+									statusMsg = humanizeKey(s)
+								}
+								if rep, ok := statusMap["report"].(map[string]any); ok {
+									if errs := flattenMessages(rep["errors"]); len(errs) > 0 {
+										messages = append(messages, fmt.Sprintf("%s proxy error: %s", name, errs[0]))
+										if len(errs) > 1 {
+											messages = append(messages, errs[1:]...)
+										}
+										statusMsg = ""
+									} else if warns := flattenMessages(rep["warnings"]); len(warns) > 0 {
+										messages = append(messages, fmt.Sprintf("%s proxy warning: %s", name, warns[0]))
+										if len(warns) > 1 {
+											messages = append(messages, warns[1:]...)
+										}
+										statusMsg = ""
+									}
+								}
+							}
+							if statusMsg != "" {
+								messages = append(messages, fmt.Sprintf("%s proxy status: %s", name, statusMsg))
+							}
+						}
+					}
+				}
+			}
+
+			messages = dedupeStrings(messages)
+			hasIssue := !comp.Healthy || (comp.Severity != "" && comp.Severity != "ok") || len(messages) > 0
+			if comp.Dismissed && len(messages) == 0 {
+				messages = append(messages, "Issue dismissed")
+			}
+			if comp.Dismissed {
+				hasIssue = true
+			}
+			if key == "derp" {
+				if hasIssue {
+					return nil, "DERP health issues are summarised in Network Information."
+				}
+				return nil, ""
+			}
+			if !hasIssue {
+				return nil, ""
+			}
+			if comp.Healthy {
+				comp.Healthy = false
+			}
+			if comp.Severity == "" || strings.ToLower(comp.Severity) == "ok" {
+				comp.Severity = "warning"
+			}
+			comp.Messages = messages
+			return comp, ""
+		}
+		for _, key := range keys {
+			if key == "time" || key == "healthy" || key == "severity" {
+				continue
+			}
+			component, note := buildComponent(key, rawMap[key])
+			if note != "" {
+				notes = append(notes, note)
+			}
+			if component != nil {
+				components = append(components, *component)
+			}
+		}
+		if len(components) > 0 {
+			status.Components = components
+		}
+		if len(notes) > 0 {
+			status.Notes = dedupeStrings(notes)
 		}
 	}
 
@@ -2013,6 +2836,15 @@ func jsonBytesEqual(a, b []byte) bool {
 	return reflect.DeepEqual(objA, objB)
 }
 
+func readZipFile(f *zip.File) ([]byte, error) {
+	rc, err := f.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	return io.ReadAll(rc)
+}
+
 func findSibling(zr *zip.Reader, name string) *zip.File {
 	for _, f := range zr.File {
 		if f.Name == name {
@@ -2020,6 +2852,104 @@ func findSibling(zr *zip.Reader, name string) *zip.File {
 		}
 	}
 	return nil
+}
+
+func flattenMessages(value any) []string {
+	var out []string
+	var visit func(any)
+	visit = func(value any) {
+		switch v := value.(type) {
+		case nil:
+			return
+		case string:
+			s := strings.TrimSpace(v)
+			if s != "" {
+				out = append(out, s)
+			}
+		case []any:
+			for _, child := range v {
+				visit(child)
+			}
+		case []string:
+			for _, child := range v {
+				visit(child)
+			}
+		case map[string]any:
+			message := ""
+			if msg, ok := v["message"]; ok {
+				message = strings.TrimSpace(fmt.Sprint(msg))
+			}
+			if message == "" {
+				for _, key := range []string{"detail", "description", "summary", "error", "reason"} {
+					if msg, ok := v[key]; ok {
+						message = strings.TrimSpace(fmt.Sprint(msg))
+						if message != "" {
+							break
+						}
+					}
+				}
+			}
+			code := strings.TrimSpace(fmt.Sprint(v["code"]))
+			if message == "" && code != "" {
+				message = code
+			} else if message != "" && code != "" {
+				message = fmt.Sprintf("%s: %s", code, message)
+			}
+			if message != "" {
+				out = append(out, message)
+			} else {
+				pretty := strings.TrimSpace(fmt.Sprint(v))
+				if pretty != "" && pretty != "map[]" {
+					out = append(out, pretty)
+				}
+			}
+		default:
+			s := strings.TrimSpace(fmt.Sprint(v))
+			if s != "" && s != "[]" {
+				out = append(out, s)
+			}
+		}
+	}
+	visit(value)
+	return out
+}
+
+func humanizeKey(key string) string {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return "Unknown"
+	}
+	replacer := strings.NewReplacer("_", " ", "-", " ")
+	key = replacer.Replace(key)
+	parts := strings.Fields(key)
+	for i, part := range parts {
+		lower := strings.ToLower(part)
+		if len(lower) == 0 {
+			continue
+		}
+		parts[i] = strings.ToUpper(lower[:1]) + lower[1:]
+	}
+	return strings.Join(parts, " ")
+}
+
+func dedupeStrings(items []string) []string {
+	if len(items) == 0 {
+		return items
+	}
+	seen := make(map[string]struct{}, len(items))
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		trimmed := strings.TrimSpace(item)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	return out
 }
 
 func sampleTypeStrings(p *profile.Profile) []string {
