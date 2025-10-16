@@ -103,17 +103,18 @@ type StoredProfile struct {
 }
 
 type Bundle struct {
-	ID               string                `json:"id"`
-	Name             string                `json:"name"`
-	Created          time.Time             `json:"created"`
-	Profiles         []*StoredProfile      `json:"profiles"`
-	Warnings         []string              `json:"warnings,omitempty"`
-	Path             string                `json:"path"`
-	Metadata         *BundleMetadata       `json:"metadata,omitempty"`
-	Prometheus       []*PrometheusSnapshot `json:"prometheus,omitempty"`
-	PrometheusURL    string                `json:"prometheusUrl,omitempty"`
-	GrafanaURL       string                `json:"grafanaUrl,omitempty"`
-	GrafanaFolderURL string                `json:"grafanaFolderUrl,omitempty"`
+	ID                 string                `json:"id"`
+	Name               string                `json:"name"`
+	Created            time.Time             `json:"created"`
+	Profiles           []*StoredProfile      `json:"profiles"`
+	Warnings           []string              `json:"warnings,omitempty"`
+	Path               string                `json:"path"`
+	Metadata           *BundleMetadata       `json:"metadata,omitempty"`
+	Prometheus         []*PrometheusSnapshot `json:"prometheus,omitempty"`
+	PrometheusURL      string                `json:"prometheusUrl,omitempty"`
+	PrometheusGraphURL string                `json:"prometheusGraphUrl,omitempty"`
+	GrafanaURL         string                `json:"grafanaUrl,omitempty"`
+	GrafanaFolderURL   string                `json:"grafanaFolderUrl,omitempty"`
 }
 
 type PrometheusSnapshot struct {
@@ -193,14 +194,17 @@ type pprofInstance struct {
 }
 
 type PrometheusInstance struct {
-	BundleID  string    `json:"bundleId"`
-	URL       string    `json:"url"`
-	Address   string    `json:"address"`
-	StartedAt time.Time `json:"startedAt"`
-	cmd       *exec.Cmd
-	dataDir   string
-	cancel    context.CancelFunc
-	done      chan struct{}
+	BundleID   string    `json:"bundleId"`
+	URL        string    `json:"url"`
+	Address    string    `json:"address"`
+	StartedAt  time.Time `json:"startedAt"`
+	cmd        *exec.Cmd
+	dataDir    string
+	cancel     context.CancelFunc
+	done       chan struct{}
+	RangeStart time.Time `json:"rangeStart"`
+	RangeEnd   time.Time `json:"rangeEnd"`
+	GraphURL   string    `json:"graphUrl"`
 }
 
 type GrafanaInstance struct {
@@ -415,7 +419,8 @@ func (s *Store) StartPrometheus(ctx context.Context, bundleID string) (*Promethe
 		return nil, fmt.Errorf("create prometheus data dir: %w", err)
 	}
 
-	if err := s.buildTSDBFromSnapshots(bundleID, bundle.Prometheus, dataDir); err != nil {
+	startRange, endRange, err := s.buildTSDBFromSnapshots(bundleID, bundle.Prometheus, dataDir)
+	if err != nil {
 		return nil, err
 	}
 
@@ -469,15 +474,18 @@ func (s *Store) StartPrometheus(ctx context.Context, bundleID string) (*Promethe
 
 	done := make(chan struct{})
 	inst := &PrometheusInstance{
-		BundleID:  bundleID,
-		URL:       "http://" + addr,
-		Address:   addr,
-		StartedAt: time.Now(),
-		cmd:       cmd,
-		dataDir:   baseDir,
-		cancel:    cancel,
-		done:      done,
+		BundleID:   bundleID,
+		URL:        "http://" + addr,
+		Address:    addr,
+		StartedAt:  time.Now(),
+		cmd:        cmd,
+		dataDir:    baseDir,
+		cancel:     cancel,
+		done:       done,
+		RangeStart: startRange,
+		RangeEnd:   endRange,
 	}
+	inst.GraphURL = buildPrometheusGraphURL(inst.URL, startRange, endRange)
 
 	s.promInstances[bundleID] = inst
 
@@ -492,6 +500,7 @@ func (s *Store) StartPrometheus(ctx context.Context, bundleID string) (*Promethe
 	s.mu.Lock()
 	if stored, ok := s.bundles[bundleID]; ok {
 		stored.PrometheusURL = inst.URL
+		stored.PrometheusGraphURL = inst.GraphURL
 	}
 	s.mu.Unlock()
 
@@ -529,6 +538,7 @@ func (s *Store) StartPrometheus(ctx context.Context, bundleID string) (*Promethe
 		s.mu.Lock()
 		if stored, ok := s.bundles[bundleID]; ok {
 			stored.PrometheusURL = ""
+			stored.PrometheusGraphURL = ""
 		}
 		s.mu.Unlock()
 		close(done)
@@ -571,6 +581,7 @@ func (s *Store) stopPrometheusLocked(bundleID string) {
 	s.mu.Lock()
 	if stored, ok := s.bundles[bundleID]; ok {
 		stored.PrometheusURL = ""
+		stored.PrometheusGraphURL = ""
 	}
 	s.mu.Unlock()
 	if stopGrafana {
@@ -961,9 +972,9 @@ func (s *Store) StopGrafana() {
 	s.grafMu.Unlock()
 }
 
-func (s *Store) buildTSDBFromSnapshots(bundleID string, snapshots []*PrometheusSnapshot, dataDir string) error {
+func (s *Store) buildTSDBFromSnapshots(bundleID string, snapshots []*PrometheusSnapshot, dataDir string) (time.Time, time.Time, error) {
 	if len(snapshots) == 0 {
-		return fmt.Errorf("bundle %q does not contain prometheus metrics", bundleID)
+		return time.Time{}, time.Time{}, fmt.Errorf("bundle %q does not contain prometheus metrics", bundleID)
 	}
 
 	entries, err := os.ReadDir(dataDir)
@@ -975,7 +986,7 @@ func (s *Store) buildTSDBFromSnapshots(bundleID string, snapshots []*PrometheusS
 
 	writer, err := tsdb.NewBlockWriter(promslog.NewNopLogger(), dataDir, int64(4*time.Hour/time.Millisecond))
 	if err != nil {
-		return fmt.Errorf("create block writer: %w", err)
+		return time.Time{}, time.Time{}, fmt.Errorf("create block writer: %w", err)
 	}
 	defer writer.Close()
 
@@ -983,11 +994,13 @@ func (s *Store) buildTSDBFromSnapshots(bundleID string, snapshots []*PrometheusS
 	app := writer.Appender(ctx)
 	totalSamples := 0
 	baseNow := time.Now().UnixMilli()
+	minTs := int64(math.MaxInt64)
+	maxTs := int64(math.MinInt64)
 
 	for idx, snap := range snapshots {
 		content, _, err := detectAndDecompressAll(snap.Content)
 		if err != nil {
-			return fmt.Errorf("decompress metrics %s: %w", snap.Name, err)
+			return time.Time{}, time.Time{}, fmt.Errorf("decompress metrics %s: %w", snap.Name, err)
 		}
 		if len(content) == 0 {
 			continue
@@ -998,7 +1011,7 @@ func (s *Store) buildTSDBFromSnapshots(bundleID string, snapshots []*PrometheusS
 		parser := expfmt.NewTextParser(model.LegacyValidation)
 		families, err := parser.TextToMetricFamilies(bytes.NewReader(content))
 		if err != nil {
-			return fmt.Errorf("parse metrics %s: %w", snap.Name, err)
+			return time.Time{}, time.Time{}, fmt.Errorf("parse metrics %s: %w", snap.Name, err)
 		}
 
 		baseTs := baseNow + int64(idx*1000)
@@ -1024,24 +1037,35 @@ func (s *Store) buildTSDBFromSnapshots(bundleID string, snapshots []*PrometheusS
 				}
 				count, err := s.appendMetricSamples(app, name, fam.GetType(), metric, ts, extraBase)
 				if err != nil {
-					return fmt.Errorf("append metric %s: %w", name, err)
+					return time.Time{}, time.Time{}, fmt.Errorf("append metric %s: %w", name, err)
 				}
 				totalSamples += count
+				if count > 0 {
+					if ts < minTs {
+						minTs = ts
+					}
+					if ts > maxTs {
+						maxTs = ts
+					}
+				}
 			}
 		}
 	}
 
 	if totalSamples == 0 {
-		return fmt.Errorf("no samples generated from prometheus metrics")
+		return time.Time{}, time.Time{}, fmt.Errorf("no samples generated from prometheus metrics")
 	}
 
 	if err := app.Commit(); err != nil {
-		return fmt.Errorf("commit prometheus samples: %w", err)
+		return time.Time{}, time.Time{}, fmt.Errorf("commit prometheus samples: %w", err)
 	}
 	if _, err := writer.Flush(ctx); err != nil {
-		return fmt.Errorf("flush prometheus block: %w", err)
+		return time.Time{}, time.Time{}, fmt.Errorf("flush prometheus block: %w", err)
 	}
-	return nil
+	if minTs == math.MaxInt64 || maxTs == math.MinInt64 {
+		return time.Time{}, time.Time{}, fmt.Errorf("no timestamps generated from prometheus metrics")
+	}
+	return time.UnixMilli(minTs).UTC(), time.UnixMilli(maxTs).UTC(), nil
 }
 
 func (s *Store) appendMetricSamples(app storage.Appender, name string, famType dto.MetricType, metric *dto.Metric, ts int64, extra map[string]string) (int, error) {
@@ -1198,6 +1222,65 @@ func formatLE(v float64) string {
 		return "+Inf"
 	}
 	return formatFloat(v)
+}
+
+func prometheusRangeString(d time.Duration) string {
+	if d <= 0 {
+		return "1h"
+	}
+	if d < time.Minute {
+		return "1m"
+	}
+	if d < time.Hour {
+		mins := int(math.Ceil(d.Minutes()))
+		if mins < 1 {
+			mins = 1
+		}
+		return fmt.Sprintf("%dm", mins)
+	}
+	if d < 24*time.Hour {
+		hours := int(math.Ceil(d.Hours()))
+		if hours < 1 {
+			hours = 1
+		}
+		return fmt.Sprintf("%dh", hours)
+	}
+	days := int(math.Ceil(d.Hours() / 24))
+	if days < 1 {
+		days = 1
+	}
+	return fmt.Sprintf("%dd", days)
+}
+
+func buildPrometheusGraphURL(baseURL string, start, end time.Time) string {
+	if baseURL == "" || start.IsZero() || end.IsZero() {
+		return ""
+	}
+	if !end.After(start) {
+		end = start.Add(time.Hour)
+	}
+	rangeStr := prometheusRangeString(end.Sub(start))
+	endStr := end.UTC().Format("2006-01-02 15:04:05")
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return ""
+	}
+	if parsed.Path == "" || parsed.Path == "/" {
+		parsed.Path = "/graph"
+	} else if !strings.HasSuffix(parsed.Path, "/graph") {
+		parsed.Path = strings.TrimRight(parsed.Path, "/") + "/graph"
+	}
+	q := parsed.Query()
+	q.Set("g0.range_input", rangeStr)
+	q.Set("g0.end_input", endStr)
+	if q.Get("g0.expr") == "" {
+		q.Set("g0.expr", "")
+	}
+	if q.Get("g0.tab") == "" {
+		q.Set("g0.tab", "0")
+	}
+	parsed.RawQuery = q.Encode()
+	return parsed.String()
 }
 
 func chooseFreeAddress() (string, error) {

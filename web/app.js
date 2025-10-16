@@ -72,7 +72,10 @@ function updateGrafanaButton(bundles) {
     }
   } else {
     button.style.display = 'none';
-    const hasPrometheus = bundles.some(b => b.prometheusUrl && isSafeURL(b.prometheusUrl));
+    const hasPrometheus = bundles.some(b => {
+      const url = b.prometheusGraphUrl || b.prometheusUrl;
+      return url && isSafeURL(url);
+    });
     if (hasPrometheus && grafanaRetryTimeout === null) {
       grafanaRetryTimeout = setTimeout(() => {
         grafanaRetryTimeout = null;
@@ -88,9 +91,15 @@ function updatePrometheusButton(bundles) {
   const button = document.getElementById('prometheus-btn');
   if (!button) return;
 
-  const bundleWithPrometheus = bundles.find(b => b.prometheusUrl && isSafeURL(b.prometheusUrl));
+  const bundleWithPrometheus = bundles.find(b => {
+    const url = b.prometheusGraphUrl || b.prometheusUrl;
+    return url && isSafeURL(url);
+  });
   if (bundleWithPrometheus) {
-    button.href = bundleWithPrometheus.prometheusUrl;
+    const target = bundleWithPrometheus.prometheusGraphUrl && isSafeURL(bundleWithPrometheus.prometheusGraphUrl)
+      ? bundleWithPrometheus.prometheusGraphUrl
+      : bundleWithPrometheus.prometheusUrl;
+    button.href = target;
     button.style.display = '';
   } else {
     button.style.display = 'none';
