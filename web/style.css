@@ -676,6 +676,20 @@ h1{ font-size: 22px; margin:0 0 4px 0;}
 .warning-icon{
   margin-right: 4px;
 }
+.profile-group-heading{
+  margin: 16px 0 8px;
+  color: var(--muted);
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.profiles > .profile-group-heading:first-of-type{
+  margin-top: 0;
+}
+.profile-divider{
+  border-top: 1px solid #1c2130;
+  margin: 24px 0 12px;
+}
 
 .profile{ 
   border:1px solid #1c2130; 

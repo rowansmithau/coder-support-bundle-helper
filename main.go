@@ -100,6 +100,7 @@ type StoredProfile struct {
 	Profile       *profile.Profile  `json:"-"`
 	Meta          map[string]string `json:"meta,omitempty"`
 	BundleID      string            `json:"bundleId"`
+	Group         string            `json:"group,omitempty"`
 }
 
 type Bundle struct {
@@ -1659,6 +1660,7 @@ func loadBundleFromZip(r io.ReaderAt, size int64, filename string) *LoadResult {
 			Profile:       p,
 			Meta:          meta,
 			CreatedAt:     time.Now(),
+			Group:         profileGroupFromPath(f.Name),
 		}
 		profs = append(profs, sp)
 		profilesAnalyzed.Inc()
@@ -2975,6 +2977,20 @@ func profileDurationSec(p *profile.Profile) float64 {
 		return float64(len(p.Sample)) * (float64(p.Period) / 1e9)
 	}
 	return 0
+}
+
+func profileGroupFromPath(path string) string {
+	lower := strings.ToLower(path)
+	switch {
+	case strings.Contains(lower, "/agent/"):
+		return "agent"
+	case strings.Contains(lower, "/coder/"):
+		return "server"
+	case strings.Contains(lower, "/deployment/"):
+		return "server"
+	default:
+		return "server"
+	}
 }
 
 // Aggregations (Top + Flame)

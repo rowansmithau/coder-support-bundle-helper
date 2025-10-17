@@ -832,9 +832,34 @@ function renderBundles(bundles) {
 
     const profilesWrap = el.querySelector('.profiles');
     profilesWrap.innerHTML = '';
-    for (const profile of bundle.profiles) {
-      profilesWrap.appendChild(renderProfile(profile, bundle.id));
-    }
+
+    const groups = [
+      { key: 'server', label: 'coderd Profiles' },
+      { key: 'agent', label: 'Agent Profiles' },
+    ];
+
+    let hasRenderedGroup = false;
+    groups.forEach(group => {
+      const groupProfiles = (bundle.profiles || []).filter(p => (p.group || 'server') === group.key);
+      if (groupProfiles.length === 0) return;
+
+      if (hasRenderedGroup) {
+        const divider = document.createElement('div');
+        divider.className = 'profile-divider';
+        profilesWrap.appendChild(divider);
+      }
+
+      const heading = document.createElement('div');
+      heading.className = 'profile-group-heading';
+      heading.textContent = group.label;
+      profilesWrap.appendChild(heading);
+
+      groupProfiles.forEach(profile => {
+        profilesWrap.appendChild(renderProfile(profile, bundle.id));
+      });
+
+      hasRenderedGroup = true;
+    });
 
     container.appendChild(el);
   });
