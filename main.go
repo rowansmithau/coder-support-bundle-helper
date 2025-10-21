@@ -252,12 +252,14 @@ type Store struct {
 	promGoCacheDir string
 	promGoModDir   string
 
-	grafMu        sync.Mutex
-	grafInstance  *GrafanaInstance
-	grafBaseDir   string
-	grafBinary    string
-	grafHome      string
-	grafFolderURL string
+	grafMu         sync.Mutex
+	grafInstance   *GrafanaInstance
+	grafBaseDir    string
+	grafBinary     string
+	grafHome       string
+	grafFolderURL  string
+	grafRangeStart time.Time
+	grafRangeEnd   time.Time
 }
 
 type pprofInstance struct {
@@ -340,8 +342,8 @@ func (s *Store) AddBundle(b *Bundle) {
 		}
 	}
 	s.bundles[b.ID] = b
-	b.GrafanaURL = currentGrafURL
-	b.GrafanaFolderURL = currentGrafFolder
+	b.GrafanaURL = buildGrafanaURLWithRange(currentGrafURL, true, s.grafRangeStart, s.grafRangeEnd)
+	b.GrafanaFolderURL = buildGrafanaURLWithRange(currentGrafFolder, true, s.grafRangeStart, s.grafRangeEnd)
 	for _, p := range b.Profiles {
 		p.BundleID = b.ID
 		s.profiles[p.ID] = p
@@ -371,11 +373,16 @@ func (s *Store) AddBundle(b *Bundle) {
 	}
 }
 
-func (s *Store) setGrafanaLinks(baseURL, folderURL string) {
+func (s *Store) setGrafanaLinks(baseURL, folderURL string, start, end time.Time) {
+	baseWithRange := buildGrafanaURLWithRange(baseURL, true, start, end)
+	folderWithRange := buildGrafanaURLWithRange(folderURL, true, start, end)
+
 	s.mu.Lock()
+	s.grafRangeStart = start
+	s.grafRangeEnd = end
 	for _, bundle := range s.bundles {
-		bundle.GrafanaURL = baseURL
-		bundle.GrafanaFolderURL = folderURL
+		bundle.GrafanaURL = baseWithRange
+		bundle.GrafanaFolderURL = folderWithRange
 	}
 	s.mu.Unlock()
 }
@@ -479,7 +486,7 @@ func (s *Store) StartPrometheus(ctx context.Context, bundleID string) (*Promethe
 	defer s.promMu.Unlock()
 
 	if inst, ok := s.promInstances[bundleID]; ok && inst.cmd != nil && inst.cmd.Process != nil {
-		if _, err := s.ensureGrafana(inst.URL); err != nil {
+		if _, err := s.ensureGrafana(inst.URL, inst.RangeStart, inst.RangeEnd); err != nil {
 			return nil, err
 		}
 		return inst, nil
@@ -564,7 +571,7 @@ func (s *Store) StartPrometheus(ctx context.Context, bundleID string) (*Promethe
 
 	s.promInstances[bundleID] = inst
 
-	if _, err := s.ensureGrafana(inst.URL); err != nil {
+	if _, err := s.ensureGrafana(inst.URL, startRange, endRange); err != nil {
 		s.logger.Error("grafana failed to start",
 			slog.String("bundle", bundleID),
 			slog.String("error", err.Error()))
@@ -602,7 +609,7 @@ func (s *Store) StartPrometheus(ctx context.Context, bundleID string) (*Promethe
 			needsUpdate := s.grafInstance != nil && s.grafInstance.PrometheusURL == inst.URL
 			s.grafMu.Unlock()
 			if needsUpdate {
-				if _, err := s.ensureGrafana(nextProm.URL); err != nil {
+				if _, err := s.ensureGrafana(nextProm.URL, nextProm.RangeStart, nextProm.RangeEnd); err != nil {
 					s.logger.Warn("failed to retarget grafana",
 						slog.String("from", inst.URL),
 						slog.String("to", nextProm.URL),
@@ -668,7 +675,7 @@ func (s *Store) stopPrometheusLocked(bundleID string) {
 		needsUpdate := s.grafInstance != nil && s.grafInstance.PrometheusURL == inst.URL
 		s.grafMu.Unlock()
 		if needsUpdate {
-			if _, err := s.ensureGrafana(nextProm.URL); err != nil {
+			if _, err := s.ensureGrafana(nextProm.URL, nextProm.RangeStart, nextProm.RangeEnd); err != nil {
 				s.logger.Warn("failed to retarget grafana",
 					slog.String("from", inst.URL),
 					slog.String("to", nextProm.URL),
@@ -693,7 +700,7 @@ func (s *Store) ensurePrometheusBinary() (string, error) {
 	return bin, nil
 }
 
-func (s *Store) writeGrafanaDashboards(dir string) error {
+func (s *Store) writeGrafanaDashboards(dir string, start, end time.Time) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
@@ -706,12 +713,45 @@ func (s *Store) writeGrafanaDashboards(dir string) error {
 		if err != nil {
 			return err
 		}
+		if updated, uErr := s.dashboardWithTimeRange(data, start, end); uErr == nil {
+			data = updated
+		} else if s.logger != nil {
+			s.logger.Warn("failed to update grafana dashboard timerange",
+				slog.String("dashboard", name),
+				slog.String("error", uErr.Error()))
+		}
 		dest := filepath.Join(dir, filepath.Base(name))
 		if err := os.WriteFile(dest, data, 0o644); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (s *Store) dashboardWithTimeRange(data []byte, start, end time.Time) ([]byte, error) {
+	if start.IsZero() || end.IsZero() {
+		return data, nil
+	}
+	if !end.After(start) {
+		end = start.Add(time.Hour)
+	}
+
+	var dashboard map[string]any
+	if err := json.Unmarshal(data, &dashboard); err != nil {
+		return nil, err
+	}
+
+	timeBlock := map[string]string{
+		"from": start.UTC().Format(time.RFC3339Nano),
+		"to":   end.UTC().Format(time.RFC3339Nano),
+	}
+	dashboard["time"] = timeBlock
+
+	serialized, err := json.MarshalIndent(dashboard, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(serialized, '\n'), nil
 }
 
 func (s *Store) ensureGrafanaBinary() (string, error) {
@@ -818,23 +858,31 @@ func detectGrafanaHome(bin string) (string, error) {
 	return "", fmt.Errorf("could not locate Grafana config defaults near %q", resolved)
 }
 
-func (s *Store) ensureGrafana(promURL string) (*GrafanaInstance, error) {
+func (s *Store) ensureGrafana(promURL string, start, end time.Time) (*GrafanaInstance, error) {
 	if promURL == "" {
 		return nil, fmt.Errorf("prometheus url required to start grafana")
 	}
 	s.grafMu.Lock()
-	inst, err := s.ensureGrafanaLocked(promURL)
+	inst, err := s.ensureGrafanaLocked(promURL, start, end)
 	s.grafMu.Unlock()
 	if err != nil {
 		return nil, err
 	}
-	s.setGrafanaLinks(inst.URL, s.grafFolderURL)
+	s.setGrafanaLinks(inst.URL, s.grafFolderURL, start, end)
 	return inst, nil
 }
 
-func (s *Store) ensureGrafanaLocked(promURL string) (*GrafanaInstance, error) {
+func (s *Store) ensureGrafanaLocked(promURL string, start, end time.Time) (*GrafanaInstance, error) {
 	if s.grafInstance != nil && s.grafInstance.cmd != nil && s.grafInstance.cmd.Process != nil {
 		if s.grafInstance.PrometheusURL == promURL {
+			if !start.IsZero() && !end.IsZero() && s.grafInstance.baseDir != "" {
+				dashboardDir := filepath.Join(s.grafInstance.baseDir, "dashboards")
+				if err := s.writeGrafanaDashboards(dashboardDir, start, end); err != nil && s.logger != nil {
+					s.logger.Warn("failed to refresh grafana dashboards",
+						slog.String("error", err.Error()))
+				}
+			}
+			s.grafFolderURL = grafanaFolderBase(s.grafInstance.URL)
 			return s.grafInstance, nil
 		}
 		s.stopGrafanaLocked()
@@ -866,7 +914,7 @@ func (s *Store) ensureGrafanaLocked(promURL string) (*GrafanaInstance, error) {
 		}
 	}
 
-	if err := s.writeGrafanaDashboards(dashboardContentDir); err != nil {
+	if err := s.writeGrafanaDashboards(dashboardContentDir, start, end); err != nil {
 		return nil, fmt.Errorf("write grafana dashboards: %w", err)
 	}
 
@@ -933,11 +981,11 @@ providers:
 		"GF_SERVER_HTTP_PORT="+port,
 		"GF_SERVER_DOMAIN="+host,
 		"GF_AUTH_ANONYMOUS_ENABLED=true",
-		"GF_AUTH_ANONYMOUS_ORG_ROLE=Editor",
+		"GF_AUTH_ANONYMOUS_ORG_ROLE=Admin",
 		"GF_USERS_EDITORS_CAN_ADMIN=true",
 		"GF_USERS_ALLOW_SIGN_UP=false",
 		"GF_USERS_AUTO_ASSIGN_ORG=true",
-		"GF_USERS_AUTO_ASSIGN_ORG_ROLE=Editor",
+		"GF_USERS_AUTO_ASSIGN_ORG_ROLE=Admin",
 		"GF_ANALYTICS_REPORTING_ENABLED=false",
 		"GF_ANALYTICS_CHECK_FOR_UPDATES=false",
 		"GF_LOG_MODE=console",
@@ -983,12 +1031,7 @@ providers:
 		baseDir:       baseDir,
 	}
 
-	folderURL := ""
-	if inst.URL != "" {
-		base := strings.TrimSuffix(inst.URL, "/")
-		folderURL = base + "/dashboards/f/" + grafanaFolderUID + "?orgId=1"
-	}
-	s.grafFolderURL = folderURL
+	s.grafFolderURL = grafanaFolderBase(inst.URL)
 
 	s.grafInstance = inst
 
@@ -1003,7 +1046,7 @@ providers:
 			s.grafFolderURL = ""
 		}
 		s.grafMu.Unlock()
-		s.setGrafanaLinks("", "")
+		s.setGrafanaLinks("", "", time.Time{}, time.Time{})
 		close(done)
 		_ = os.RemoveAll(baseDir)
 	}(inst)
@@ -1035,7 +1078,7 @@ func (s *Store) stopGrafanaLocked() {
 	}
 	s.grafInstance = nil
 	s.grafFolderURL = ""
-	s.setGrafanaLinks("", "")
+	s.setGrafanaLinks("", "", time.Time{}, time.Time{})
 	if inst.baseDir != "" {
 		_ = os.RemoveAll(inst.baseDir)
 	}
@@ -1356,6 +1399,42 @@ func buildPrometheusGraphURL(baseURL string, start, end time.Time) string {
 	}
 	parsed.RawQuery = q.Encode()
 	return parsed.String()
+}
+
+func buildGrafanaURLWithRange(raw string, ensureOrg bool, start, end time.Time) string {
+	if raw == "" {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+
+	q := parsed.Query()
+	if ensureOrg {
+		if q.Get("orgId") == "" {
+			q.Set("orgId", "1")
+		}
+	}
+
+	if !start.IsZero() && !end.IsZero() {
+		if !end.After(start) {
+			end = start.Add(time.Hour)
+		}
+		q.Set("from", strconv.FormatInt(start.UTC().UnixMilli(), 10))
+		q.Set("to", strconv.FormatInt(end.UTC().UnixMilli(), 10))
+	}
+
+	parsed.RawQuery = q.Encode()
+	return parsed.String()
+}
+
+func grafanaFolderBase(base string) string {
+	if base == "" {
+		return ""
+	}
+	trimmed := strings.TrimSuffix(base, "/")
+	return trimmed + "/dashboards/f/" + grafanaFolderUID
 }
 
 func chooseFreeAddress() (string, error) {
