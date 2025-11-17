@@ -1,0 +1,434 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": false,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "target": {
+          "limit": 100,
+          "matchAny": false,
+          "tags": [],
+          "type": "dashboard"
+        },
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Discovery Messages Received",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "pluginVersion": "10.4.0",
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace(rate(magicsock_disco_recv_udp[5m]) or (magicsock_disco_recv_udp * 0), \"event\", \"recv_udp\", \"__name__\", \".*\") or label_replace(rate(magicsock_disco_recv_ping[5m]) or (magicsock_disco_recv_ping * 0), \"event\", \"recv_ping\", \"__name__\", \".*\") or label_replace(rate(magicsock_disco_recv_pong[5m]) or (magicsock_disco_recv_pong * 0), \"event\", \"recv_pong\", \"__name__\", \".*\") or label_replace(rate(magicsock_disco_recv_derp[5m]) or (magicsock_disco_recv_derp * 0), \"event\", \"recv_derp\", \"__name__\", \".*\") or label_replace(rate(magicsock_disco_recv_callmemaybe[5m]) or (magicsock_disco_recv_callmemaybe * 0), \"event\", \"recv_callmemaybe\", \"__name__\", \".*\")",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "instant": false,
+          "range": true,
+          "exemplar": false,
+          "editorMode": "code",
+          "legendFormat": "{{event}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 3,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "pps",
+          "decimals": 1
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Discovery Messages Sent",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "pluginVersion": "10.4.0",
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace(rate(magicsock_disco_send_udp[5m]) or (magicsock_disco_send_udp * 0), \"event\", \"send_udp\", \"__name__\", \".*\") or label_replace(rate(magicsock_disco_sent_udp[5m]) or (magicsock_disco_sent_udp * 0), \"event\", \"sent_udp\", \"__name__\", \".*\") or label_replace(rate(magicsock_disco_sent_ping[5m]) or (magicsock_disco_sent_ping * 0), \"event\", \"sent_ping\", \"__name__\", \".*\") or label_replace(rate(magicsock_disco_sent_pong[5m]) or (magicsock_disco_sent_pong * 0), \"event\", \"sent_pong\", \"__name__\", \".*\") or label_replace(rate(magicsock_disco_send_derp[5m]) or (magicsock_disco_send_derp * 0), \"event\", \"send_derp\", \"__name__\", \".*\") or label_replace(rate(magicsock_disco_sent_derp[5m]) or (magicsock_disco_sent_derp * 0), \"event\", \"sent_derp\", \"__name__\", \".*\") or label_replace(rate(magicsock_disco_sent_callmemaybe[5m]) or (magicsock_disco_sent_callmemaybe * 0), \"event\", \"sent_callmemaybe\", \"__name__\", \".*\")",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "instant": false,
+          "range": true,
+          "exemplar": false,
+          "editorMode": "code",
+          "legendFormat": "{{event}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 3,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "pps",
+          "decimals": 1
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Discovery Receive Anomalies",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 8
+      },
+      "pluginVersion": "10.4.0",
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace(rate(magicsock_disco_recv_bad_parse[5m]) or (magicsock_disco_recv_bad_parse * 0), \"event\", \"recv_bad_parse\", \"__name__\", \".*\") or label_replace(rate(magicsock_disco_recv_bad_key[5m]) or (magicsock_disco_recv_bad_key * 0), \"event\", \"recv_bad_key\", \"__name__\", \".*\") or label_replace(rate(magicsock_disco_recv_bad_peer[5m]) or (magicsock_disco_recv_bad_peer * 0), \"event\", \"recv_bad_peer\", \"__name__\", \".*\") or label_replace(rate(magicsock_disco_recv_callmemaybe_bad_disco[5m]) or (magicsock_disco_recv_callmemaybe_bad_disco * 0), \"event\", \"recv_callmemaybe_bad_disco\", \"__name__\", \".*\") or label_replace(rate(magicsock_disco_recv_callmemaybe_bad_node[5m]) or (magicsock_disco_recv_callmemaybe_bad_node * 0), \"event\", \"recv_callmemaybe_bad_node\", \"__name__\", \".*\") or label_replace(rate(magicsock_disco_recv_derp_peer_not_here[5m]) or (magicsock_disco_recv_derp_peer_not_here * 0), \"event\", \"recv_derp_peer_not_here\", \"__name__\", \".*\") or label_replace(rate(magicsock_disco_recv_derp_peer_gone_unknown[5m]) or (magicsock_disco_recv_derp_peer_gone_unknown * 0), \"event\", \"recv_derp_peer_gone_unknown\", \"__name__\", \".*\") or label_replace(rate(magicsock_disco_recv_bpf_ipv4[5m]) or (magicsock_disco_recv_bpf_ipv4 * 0), \"event\", \"recv_bpf_ipv4\", \"__name__\", \".*\") or label_replace(rate(magicsock_disco_recv_bpf_ipv6[5m]) or (magicsock_disco_recv_bpf_ipv6 * 0), \"event\", \"recv_bpf_ipv6\", \"__name__\", \".*\")",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "instant": false,
+          "range": true,
+          "exemplar": false,
+          "editorMode": "code",
+          "legendFormat": "{{event}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 3,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "pps",
+          "decimals": 3
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Discovery Counters",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 16
+      },
+      "pluginVersion": "10.4.0",
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace(magicsock_disco_recv_udp, \"event\", \"recv_udp\", \"__name__\", \".*\") or label_replace(magicsock_disco_recv_ping, \"event\", \"recv_ping\", \"__name__\", \".*\") or label_replace(magicsock_disco_recv_pong, \"event\", \"recv_pong\", \"__name__\", \".*\") or label_replace(magicsock_disco_recv_derp, \"event\", \"recv_derp\", \"__name__\", \".*\") or label_replace(magicsock_disco_recv_callmemaybe, \"event\", \"recv_callmemaybe\", \"__name__\", \".*\") or label_replace(magicsock_disco_recv_bad_parse, \"event\", \"recv_bad_parse\", \"__name__\", \".*\") or label_replace(magicsock_disco_recv_bad_key, \"event\", \"recv_bad_key\", \"__name__\", \".*\") or label_replace(magicsock_disco_recv_bad_peer, \"event\", \"recv_bad_peer\", \"__name__\", \".*\") or label_replace(magicsock_disco_recv_callmemaybe_bad_disco, \"event\", \"recv_callmemaybe_bad_disco\", \"__name__\", \".*\") or label_replace(magicsock_disco_recv_callmemaybe_bad_node, \"event\", \"recv_callmemaybe_bad_node\", \"__name__\", \".*\") or label_replace(magicsock_disco_recv_derp_peer_not_here, \"event\", \"recv_derp_peer_not_here\", \"__name__\", \".*\") or label_replace(magicsock_disco_recv_derp_peer_gone_unknown, \"event\", \"recv_derp_peer_gone_unknown\", \"__name__\", \".*\") or label_replace(magicsock_disco_recv_bpf_ipv4, \"event\", \"recv_bpf_ipv4\", \"__name__\", \".*\") or label_replace(magicsock_disco_recv_bpf_ipv6, \"event\", \"recv_bpf_ipv6\", \"__name__\", \".*\") or label_replace(magicsock_disco_send_udp, \"event\", \"send_udp\", \"__name__\", \".*\") or label_replace(magicsock_disco_sent_udp, \"event\", \"sent_udp\", \"__name__\", \".*\") or label_replace(magicsock_disco_sent_ping, \"event\", \"sent_ping\", \"__name__\", \".*\") or label_replace(magicsock_disco_sent_pong, \"event\", \"sent_pong\", \"__name__\", \".*\") or label_replace(magicsock_disco_send_derp, \"event\", \"send_derp\", \"__name__\", \".*\") or label_replace(magicsock_disco_sent_derp, \"event\", \"sent_derp\", \"__name__\", \".*\") or label_replace(magicsock_disco_sent_callmemaybe, \"event\", \"sent_callmemaybe\", \"__name__\", \".*\")",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "instant": false,
+          "range": true,
+          "exemplar": false,
+          "editorMode": "code",
+          "legendFormat": "{{event}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 3,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      }
+    }
+  ],
+  "refresh": "",
+  "schemaVersion": 39,
+  "tags": [
+    "support-bundle",
+    "agent",
+    "magicsock"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Magicsock Discovery",
+  "uid": "agent-discovery",
+  "version": 1,
+  "weekStart": ""
+}

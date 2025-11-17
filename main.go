@@ -1771,21 +1771,49 @@ func parseBundleMetadata(zr *zip.Reader, metadata *BundleMetadata, warnings *[]s
 				if len(content) > 0 {
 					metadata.BuildInfo = json.RawMessage(content)
 				}
-				var buildInfo map[string]interface{}
-				if err := json.Unmarshal(content, &buildInfo); err == nil {
-					// Extract deployment_id
-					if deploymentID, ok := buildInfo["deployment_id"].(string); ok {
+			var buildInfo map[string]interface{}
+			if err := json.Unmarshal(content, &buildInfo); err == nil {
+				// Extract deployment_id
+				if deploymentID, ok := buildInfo["deployment_id"].(string); ok {
+					deploymentID = strings.TrimSpace(deploymentID)
+					if deploymentID != "" {
 						metadata.DeploymentID = deploymentID
 					}
-					// Extract version
-					if version, ok := buildInfo["version"].(string); ok {
+				}
+				// Extract version
+				if version, ok := buildInfo["version"].(string); ok {
+					version = strings.TrimSpace(version)
+					if version != "" {
 						metadata.Version = version
 					}
-					// Also check for external_url
-					if extURL, ok := buildInfo["external_url"].(string); ok && metadata.Version == "" {
-						// Sometimes version is in external_url
-						if strings.Contains(extURL, "/commit/") {
-							parts := strings.Split(extURL, "/commit/")
+				}
+				// Extract dashboard URL, prefer canonical spelling but allow variants
+				if metadata.DashboardURL == "" {
+					if d, ok := buildInfo["dashboard_url"].(string); ok {
+						if d = strings.TrimSpace(d); d != "" {
+							metadata.DashboardURL = d
+						}
+					}
+				}
+				if metadata.DashboardURL == "" {
+					if d, ok := buildInfo["dashboardUrl"].(string); ok {
+						if d = strings.TrimSpace(d); d != "" {
+							metadata.DashboardURL = d
+						}
+					}
+				}
+				if metadata.DashboardURL == "" {
+					if d, ok := buildInfo["dashboardURL"].(string); ok {
+						if d = strings.TrimSpace(d); d != "" {
+							metadata.DashboardURL = d
+						}
+					}
+				}
+				// Also check for external_url
+				if extURL, ok := buildInfo["external_url"].(string); ok && metadata.Version == "" {
+					// Sometimes version is in external_url
+					if strings.Contains(extURL, "/commit/") {
+						parts := strings.Split(extURL, "/commit/")
 							if len(parts) > 1 && len(parts[1]) >= 8 {
 								metadata.Version = "commit:" + parts[1][:8] // First 8 chars of commit
 							}
@@ -1821,12 +1849,17 @@ func parseBundleMetadata(zr *zip.Reader, metadata *BundleMetadata, warnings *[]s
 							}
 
 							// Extract version and dashboard URL if available
-							if v, ok := licenseData["version"].(string); ok && metadata.Version == "" {
-								metadata.Version = v
-							}
-							if d, ok := licenseData["dashboard_url"].(string); ok {
-								metadata.DashboardURL = d
-							}
+								if v, ok := licenseData["version"].(string); ok && metadata.Version == "" {
+									v = strings.TrimSpace(v)
+									if v != "" {
+										metadata.Version = v
+									}
+								}
+								if d, ok := licenseData["dashboard_url"].(string); ok && metadata.DashboardURL == "" {
+									if d = strings.TrimSpace(d); d != "" {
+										metadata.DashboardURL = d
+									}
+								}
 							if d, ok := licenseData["deployment_id"].(string); ok && metadata.DeploymentID == "" {
 								metadata.DeploymentID = d
 							}
@@ -2573,8 +2606,8 @@ func parseNetworkInfo(zr *zip.Reader, metadata *BundleMetadata, warnings *[]stri
 			addError(msg)
 		} else {
 			var payload struct {
-				Severity   string   `json:"severity"`
-				Warnings   []string `json:"warnings"`
+				Severity   string            `json:"severity"`
+				Warnings   []json.RawMessage `json:"warnings"`
 				Interfaces []struct {
 					Name      string   `json:"name"`
 					MTU       int      `json:"mtu"`
@@ -2590,7 +2623,32 @@ func parseNetworkInfo(zr *zip.Reader, metadata *BundleMetadata, warnings *[]stri
 					addWarning(fmt.Sprintf("Interface report severity: %s", payload.Severity))
 				}
 				for _, warn := range payload.Warnings {
-					addWarning(warn)
+					var text string
+					if err := json.Unmarshal(warn, &text); err == nil {
+						text = strings.TrimSpace(text)
+						if text != "" {
+							addWarning(text)
+						}
+						continue
+					}
+					var warnObj struct {
+						Message string `json:"message"`
+						Summary string `json:"summary"`
+					}
+					if err := json.Unmarshal(warn, &warnObj); err == nil {
+						msg := strings.TrimSpace(warnObj.Message)
+						if msg == "" {
+							msg = strings.TrimSpace(warnObj.Summary)
+						}
+						if msg != "" {
+							addWarning(msg)
+							continue
+						}
+					}
+					raw := strings.TrimSpace(string(warn))
+					if raw != "" && raw != "null" {
+						addWarning(raw)
+					}
 				}
 				for _, iface := range payload.Interfaces {
 					info.Interfaces = append(info.Interfaces, NetworkInterfaceInfo{

@@ -568,7 +568,7 @@
     },
     {
       "id": 9,
-      "type": "table",
+      "type": "timeseries",
       "title": "Discovery Messages",
       "datasource": {
         "type": "prometheus",
@@ -582,17 +582,17 @@
       },
       "pluginVersion": "10.4.0",
       "options": {
-        "cellHeight": "sm",
-        "footer": {
-          "countRows": false,
-          "enablePagination": true,
-          "fields": [],
-          "reducer": [
-            "last"
-          ],
-          "show": false
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
         },
-        "showHeader": true
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
       },
       "targets": [
         {
@@ -602,73 +602,70 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "instant": true,
-          "range": false,
+          "instant": false,
+          "range": true,
           "exemplar": false,
           "editorMode": "code",
-          "format": "table"
+          "legendFormat": "{{event}}"
         }
       ],
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "thresholds"
+            "mode": "palette-classic"
           },
           "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
             },
-            "filterable": true,
-            "inspect": false
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 3,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
           },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "#1F60C4",
+                "color": "green",
                 "value": null
               }
             ]
-          }
+          },
+          "unit": "short",
+          "decimals": 0
         },
         "overrides": []
-      },
-      "transformations": [
-        {
-          "id": "labelsToFields",
-          "options": {
-            "mode": "columns"
-          }
-        },
-        {
-          "id": "sortBy",
-          "options": {
-            "fields": {},
-            "sort": [
-              {
-                "field": "Count",
-                "desc": true
-              }
-            ]
-          }
-        },
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {},
-            "renameByName": {
-              "Value": "Count"
-            }
-          }
-        }
-      ]
+      }
     },
     {
       "id": 10,
-      "type": "table",
-      "title": "WireGuard Tunnel Packets",
+      "type": "timeseries",
+      "title": "WireGuard Packet Rates",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -680,93 +677,90 @@
         "y": 16
       },
       "pluginVersion": "10.4.0",
-      "options": {
-        "cellHeight": "sm",
-        "footer": {
-          "countRows": false,
-          "enablePagination": true,
-          "fields": [],
-          "reducer": [
-            "last"
-          ],
-          "show": false
-        },
-        "showHeader": true
-      },
       "targets": [
         {
           "refId": "A",
-          "expr": "label_replace(tstun_in_from_wg, \"direction\", \"in_from_wg\", \"__name__\", \".*\") or label_replace(tstun_in_from_wg_drop, \"direction\", \"in_from_wg_drop\", \"__name__\", \".*\") or label_replace(tstun_out_to_wg, \"direction\", \"out_to_wg\", \"__name__\", \".*\") or label_replace(tstun_out_to_wg_drop, \"direction\", \"out_to_wg_drop\", \"__name__\", \".*\")",
+          "expr": "label_replace(rate(tstun_in_from_wg[5m]) or (tstun_in_from_wg * 0), \"direction\", \"in_from_wg\", \"__name__\", \".*\") or label_replace(rate(tstun_out_to_wg[5m]) or (tstun_out_to_wg * 0), \"direction\", \"out_to_wg\", \"__name__\", \".*\") or label_replace(rate(tstun_in_from_wg_drop[5m]) or (tstun_in_from_wg_drop * 0), \"direction\", \"in_drop_total\", \"__name__\", \".*\") or label_replace(rate(tstun_out_to_wg_drop[5m]) or (tstun_out_to_wg_drop * 0), \"direction\", \"out_drop_total\", \"__name__\", \".*\") or label_replace(rate(tstun_in_from_wg_drop_filter[5m]) or (tstun_in_from_wg_drop_filter * 0), \"direction\", \"in_drop_filter\", \"__name__\", \".*\") or label_replace(rate(tstun_out_to_wg_drop_filter[5m]) or (tstun_out_to_wg_drop_filter * 0), \"direction\", \"out_drop_filter\", \"__name__\", \".*\") or label_replace(rate(tstun_in_from_wg_drop_self_disco[5m]) or (tstun_in_from_wg_drop_self_disco * 0), \"direction\", \"in_drop_self_disco\", \"__name__\", \".*\") or label_replace(rate(tstun_out_to_wg_drop_self_disco[5m]) or (tstun_out_to_wg_drop_self_disco * 0), \"direction\", \"out_drop_self_disco\", \"__name__\", \".*\")",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "instant": true,
-          "range": false,
+          "instant": false,
+          "range": true,
           "exemplar": false,
           "editorMode": "code",
-          "format": "table"
+          "legendFormat": "{{direction}}"
         }
       ],
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "thresholds"
+            "mode": "palette-classic"
           },
           "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
             },
-            "filterable": true,
-            "inspect": false
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
           },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "#1F60C4",
+                "color": "green",
                 "value": null
               }
             ]
-          }
+          },
+          "unit": "pps",
+          "decimals": 1
         },
         "overrides": []
       },
-      "transformations": [
-        {
-          "id": "labelsToFields",
-          "options": {
-            "mode": "columns"
-          }
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "list",
+          "placement": "bottom"
         },
-        {
-          "id": "sortBy",
-          "options": {
-            "fields": {},
-            "sort": [
-              {
-                "field": "Packets",
-                "desc": true
-              }
-            ]
-          }
-        },
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {},
-            "renameByName": {
-              "Value": "Packets"
-            }
-          }
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
         }
-      ]
+      }
     },
     {
       "id": 11,
-      "type": "table",
+      "type": "timeseries",
       "title": "Magicsock Data Activity",
       "datasource": {
         "type": "prometheus",
@@ -780,17 +774,17 @@
       },
       "pluginVersion": "10.4.0",
       "options": {
-        "cellHeight": "sm",
-        "footer": {
-          "countRows": false,
-          "enablePagination": true,
-          "fields": [],
-          "reducer": [
-            "last"
-          ],
-          "show": false
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
         },
-        "showHeader": true
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
       },
       "targets": [
         {
@@ -800,72 +794,69 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "instant": true,
-          "range": false,
+          "instant": false,
+          "range": true,
           "exemplar": false,
           "editorMode": "code",
-          "format": "table"
+          "legendFormat": "{{channel}}"
         }
       ],
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "thresholds"
+            "mode": "palette-classic"
           },
           "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
             },
-            "filterable": true,
-            "inspect": false
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 3,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
           },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "#1F60C4",
+                "color": "green",
                 "value": null
               }
             ]
-          }
+          },
+          "unit": "short",
+          "decimals": 0
         },
         "overrides": []
-      },
-      "transformations": [
-        {
-          "id": "labelsToFields",
-          "options": {
-            "mode": "columns"
-          }
-        },
-        {
-          "id": "sortBy",
-          "options": {
-            "fields": {},
-            "sort": [
-              {
-                "field": "Count",
-                "desc": true
-              }
-            ]
-          }
-        },
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {},
-            "renameByName": {
-              "Value": "Count"
-            }
-          }
-        }
-      ]
+      }
     },
     {
       "id": 12,
-      "type": "table",
+      "type": "timeseries",
       "title": "Portmap Attempts",
       "datasource": {
         "type": "prometheus",
@@ -879,17 +870,17 @@
       },
       "pluginVersion": "10.4.0",
       "options": {
-        "cellHeight": "sm",
-        "footer": {
-          "countRows": false,
-          "enablePagination": true,
-          "fields": [],
-          "reducer": [
-            "last"
-          ],
-          "show": false
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
         },
-        "showHeader": true
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
       },
       "targets": [
         {
@@ -899,68 +890,161 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "instant": true,
-          "range": false,
+          "instant": false,
+          "range": true,
           "exemplar": false,
           "editorMode": "code",
-          "format": "table"
+          "legendFormat": "{{mechanism}}"
         }
       ],
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "thresholds"
+            "mode": "palette-classic"
           },
           "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
             },
-            "filterable": true,
-            "inspect": false
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 3,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
           },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "#1F60C4",
+                "color": "green",
                 "value": null
               }
             ]
-          }
+          },
+          "unit": "short",
+          "decimals": 0
         },
         "overrides": []
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "WireGuard Packet Totals",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
       },
-      "transformations": [
-        {
-          "id": "labelsToFields",
-          "options": {
-            "mode": "columns"
-          }
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 36
+      },
+      "pluginVersion": "10.4.0",
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
         },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
         {
-          "id": "sortBy",
-          "options": {
-            "fields": {},
-            "sort": [
+          "refId": "A",
+          "expr": "label_replace(tstun_in_from_wg, \"metric\", \"Inbound Received\", \"__name__\", \".*\") or label_replace(tstun_in_from_wg_drop, \"metric\", \"Inbound Dropped (total)\", \"__name__\", \".*\") or label_replace(tstun_in_from_wg_drop_filter, \"metric\", \"Inbound Dropped - Filtered\", \"__name__\", \".*\") or label_replace(tstun_in_from_wg_drop_self_disco, \"metric\", \"Inbound Dropped - Self Disco\", \"__name__\", \".*\") or label_replace(clamp_min(tstun_in_from_wg - tstun_in_from_wg_drop, 0), \"metric\", \"Inbound Forwarded\", \"__name__\", \".*\") or label_replace(tstun_out_to_wg, \"metric\", \"Outbound Sent\", \"__name__\", \".*\") or label_replace(tstun_out_to_wg_drop, \"metric\", \"Outbound Dropped (total)\", \"__name__\", \".*\") or label_replace(tstun_out_to_wg_drop_filter, \"metric\", \"Outbound Dropped - Filtered\", \"__name__\", \".*\") or label_replace(tstun_out_to_wg_drop_self_disco, \"metric\", \"Outbound Dropped - Self Disco\", \"__name__\", \".*\") or label_replace(clamp_min(tstun_out_to_wg - tstun_out_to_wg_drop, 0), \"metric\", \"Outbound Forwarded\", \"__name__\", \".*\")",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "instant": false,
+          "range": true,
+          "exemplar": false,
+          "editorMode": "code",
+          "legendFormat": "{{metric}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 3,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
               {
-                "field": "Count",
-                "desc": true
+                "color": "green",
+                "value": null
               }
             ]
-          }
+          },
+          "unit": "short",
+          "decimals": 0
         },
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {},
-            "renameByName": {
-              "Value": "Count"
-            }
-          }
-        }
-      ]
+        "overrides": []
+      }
     }
   ],
   "refresh": "",
