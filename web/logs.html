@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Agent Logs</title>
+  <link rel="stylesheet" href="/style.css"/>
+</head>
+<body>
+  <main class="logs-page">
+    <div class="logs-page-shell">
+      <div class="logs-page-header">
+        <div>
+          <h1>Agent Logs</h1>
+          <div id="logs-page-path" class="logs-page-path">—</div>
+        </div>
+        <div class="logs-page-actions">
+          <span id="logs-page-meta" class="logs-info muted">Loading…</span>
+          <button id="logs-page-reload" class="load-logs-btn" disabled>Reload Logs</button>
+        </div>
+      </div>
+      <div id="logs-page-body" class="logs-body">
+        <div class="muted">Loading logs…</div>
+      </div>
+    </div>
+  </main>
+  <script src="/logs.js"></script>
+</body>
+</html>

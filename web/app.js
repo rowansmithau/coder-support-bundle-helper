@@ -99,6 +99,9 @@ async function fetchBundles() {
   if (bundles.length > 0) {
     const primaryBundle = bundles[0];
     displayBundleMetadata(primaryBundle);
+    updateLogsButton(primaryBundle);
+  } else {
+    updateLogsButton(null);
   }
   
   // Collect all profiles for comparison selector
@@ -170,6 +173,18 @@ function updatePrometheusButton(bundles) {
   } else {
     button.style.display = 'none';
   }
+}
+
+function updateLogsButton(bundle) {
+  const button = document.getElementById('logs-btn');
+  if (!button) return;
+  if (!bundle) {
+    button.style.display = 'none';
+    button.removeAttribute('href');
+    return;
+  }
+  button.href = `/logs?bundle=${encodeURIComponent(bundle.id)}`;
+  button.style.display = '';
 }
 
 function displayBundleMetadata(bundle) {
@@ -1660,7 +1675,7 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('close-timeseries')?.addEventListener('click', () => {
     document.getElementById('timeseries-modal').classList.add('hidden');
   });
-  
+
   // Close modals on background click
   document.getElementById('comparison-modal').addEventListener('click', (e) => {
     if (e.target.id === 'comparison-modal') {

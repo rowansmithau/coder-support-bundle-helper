@@ -13,6 +13,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	htmltemplate "html/template"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -34,6 +35,9 @@ import (
 	"syscall"
 	"time"
 
+	chromahtml "github.com/alecthomas/chroma/v2/formatters/html"
+	"github.com/alecthomas/chroma/v2/lexers"
+	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/google/pprof/profile"
 	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus"
@@ -55,6 +59,8 @@ const (
 	pprofTimeout       = 30 * time.Minute
 	defaultListenAddr  = "127.0.0.1:6969"
 	maxGzipLayers      = 5
+	maxAgentLogBytes   = 2 << 20 // 2MB of log content rendered to avoid huge payloads
+	agentLogPath       = "agent/logs.txt"
 	grafanaProviderUID = "coder-provider"
 	grafanaFolderUID   = "coder-dashboards"
 )
@@ -111,6 +117,7 @@ type Bundle struct {
 	Warnings           []string              `json:"warnings,omitempty"`
 	Path               string                `json:"path"`
 	Metadata           *BundleMetadata       `json:"metadata,omitempty"`
+	AgentLog           *BundleLog            `json:"agentLog,omitempty"`
 	Prometheus         []*PrometheusSnapshot `json:"prometheus,omitempty"`
 	PrometheusURL      string                `json:"prometheusUrl,omitempty"`
 	PrometheusGraphURL string                `json:"prometheusGraphUrl,omitempty"`
@@ -126,6 +133,14 @@ type PrometheusSnapshot struct {
 	Size      int       `json:"size"`
 	CreatedAt time.Time `json:"createdAt"`
 	Content   []byte    `json:"-"`
+}
+
+type BundleLog struct {
+	Path            string `json:"path"`
+	Size            int64  `json:"size"`
+	Lines           int    `json:"lines"`
+	Truncated       bool   `json:"truncated"`
+	HighlightedHTML string `json:"-"`
 }
 
 type BundleMetadata struct {
@@ -1642,6 +1657,15 @@ func loadBundleFromZip(r io.ReaderAt, size int64, filename string) *LoadResult {
 		b.Created = *captured
 	}
 
+	if logFile, warns := loadAgentLog(zr); logFile != nil || len(warns) > 0 {
+		if logFile != nil {
+			b.AgentLog = logFile
+		}
+		if len(warns) > 0 {
+			result.Warnings = append(result.Warnings, warns...)
+		}
+	}
+
 	var (
 		profs     []*StoredProfile
 		promSnaps []*PrometheusSnapshot
@@ -1759,6 +1783,74 @@ func loadBundleFromZip(r io.ReaderAt, size int64, filename string) *LoadResult {
 	return result
 }
 
+func loadAgentLog(zr *zip.Reader) (*BundleLog, []string) {
+	f := findSibling(zr, agentLogPath)
+	if f == nil {
+		return nil, nil
+	}
+
+	content, truncated, err := readZipFileLimited(f, maxAgentLogBytes)
+	if err != nil {
+		return nil, []string{fmt.Sprintf("failed to read %s: %v", f.Name, err)}
+	}
+
+	htmlOut, err := renderLogHTML(content)
+	var warnings []string
+	if err != nil {
+		warnings = append(warnings, fmt.Sprintf("failed to syntax-highlight %s: %v", f.Name, err))
+		htmlOut = "<pre class=\"log-plain\">" + htmltemplate.HTMLEscapeString(string(content)) + "</pre>"
+	}
+
+	lines := 0
+	if len(content) > 0 {
+		lines = bytes.Count(content, []byte{'\n'}) + 1
+	}
+
+	size := f.FileInfo().Size()
+	return &BundleLog{
+		Path:            f.Name,
+		Size:            size,
+		Lines:           lines,
+		Truncated:       truncated || int64(len(content)) < size,
+		HighlightedHTML: htmlOut,
+	}, warnings
+}
+
+func renderLogHTML(content []byte) (string, error) {
+	lexer := lexers.Analyse(string(content))
+	if lexer == nil {
+		lexer = lexers.Get("syslog")
+	}
+	if lexer == nil {
+		lexer = lexers.Get("log")
+	}
+	if lexer == nil {
+		lexer = lexers.Fallback
+	}
+
+	style := styles.Get("monokai")
+	if style == nil {
+		style = styles.Fallback
+	}
+
+	formatter := chromahtml.New(
+		chromahtml.WithLineNumbers(true),
+		chromahtml.WithClasses(false),
+		chromahtml.TabWidth(2),
+	)
+
+	iter, err := lexer.Tokenise(nil, string(content))
+	if err != nil {
+		return "", err
+	}
+
+	var buf bytes.Buffer
+	if err := formatter.Format(&buf, style, iter); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
 func parseBundleMetadata(zr *zip.Reader, metadata *BundleMetadata, warnings *[]string) *time.Time {
 	var buildInfoRaw []byte
 	var capturedAt *time.Time
@@ -1771,49 +1863,49 @@ func parseBundleMetadata(zr *zip.Reader, metadata *BundleMetadata, warnings *[]s
 				if len(content) > 0 {
 					metadata.BuildInfo = json.RawMessage(content)
 				}
-			var buildInfo map[string]interface{}
-			if err := json.Unmarshal(content, &buildInfo); err == nil {
-				// Extract deployment_id
-				if deploymentID, ok := buildInfo["deployment_id"].(string); ok {
-					deploymentID = strings.TrimSpace(deploymentID)
-					if deploymentID != "" {
-						metadata.DeploymentID = deploymentID
-					}
-				}
-				// Extract version
-				if version, ok := buildInfo["version"].(string); ok {
-					version = strings.TrimSpace(version)
-					if version != "" {
-						metadata.Version = version
-					}
-				}
-				// Extract dashboard URL, prefer canonical spelling but allow variants
-				if metadata.DashboardURL == "" {
-					if d, ok := buildInfo["dashboard_url"].(string); ok {
-						if d = strings.TrimSpace(d); d != "" {
-							metadata.DashboardURL = d
+				var buildInfo map[string]interface{}
+				if err := json.Unmarshal(content, &buildInfo); err == nil {
+					// Extract deployment_id
+					if deploymentID, ok := buildInfo["deployment_id"].(string); ok {
+						deploymentID = strings.TrimSpace(deploymentID)
+						if deploymentID != "" {
+							metadata.DeploymentID = deploymentID
 						}
 					}
-				}
-				if metadata.DashboardURL == "" {
-					if d, ok := buildInfo["dashboardUrl"].(string); ok {
-						if d = strings.TrimSpace(d); d != "" {
-							metadata.DashboardURL = d
+					// Extract version
+					if version, ok := buildInfo["version"].(string); ok {
+						version = strings.TrimSpace(version)
+						if version != "" {
+							metadata.Version = version
 						}
 					}
-				}
-				if metadata.DashboardURL == "" {
-					if d, ok := buildInfo["dashboardURL"].(string); ok {
-						if d = strings.TrimSpace(d); d != "" {
-							metadata.DashboardURL = d
+					// Extract dashboard URL, prefer canonical spelling but allow variants
+					if metadata.DashboardURL == "" {
+						if d, ok := buildInfo["dashboard_url"].(string); ok {
+							if d = strings.TrimSpace(d); d != "" {
+								metadata.DashboardURL = d
+							}
 						}
 					}
-				}
-				// Also check for external_url
-				if extURL, ok := buildInfo["external_url"].(string); ok && metadata.Version == "" {
-					// Sometimes version is in external_url
-					if strings.Contains(extURL, "/commit/") {
-						parts := strings.Split(extURL, "/commit/")
+					if metadata.DashboardURL == "" {
+						if d, ok := buildInfo["dashboardUrl"].(string); ok {
+							if d = strings.TrimSpace(d); d != "" {
+								metadata.DashboardURL = d
+							}
+						}
+					}
+					if metadata.DashboardURL == "" {
+						if d, ok := buildInfo["dashboardURL"].(string); ok {
+							if d = strings.TrimSpace(d); d != "" {
+								metadata.DashboardURL = d
+							}
+						}
+					}
+					// Also check for external_url
+					if extURL, ok := buildInfo["external_url"].(string); ok && metadata.Version == "" {
+						// Sometimes version is in external_url
+						if strings.Contains(extURL, "/commit/") {
+							parts := strings.Split(extURL, "/commit/")
 							if len(parts) > 1 && len(parts[1]) >= 8 {
 								metadata.Version = "commit:" + parts[1][:8] // First 8 chars of commit
 							}
@@ -1849,17 +1941,17 @@ func parseBundleMetadata(zr *zip.Reader, metadata *BundleMetadata, warnings *[]s
 							}
 
 							// Extract version and dashboard URL if available
-								if v, ok := licenseData["version"].(string); ok && metadata.Version == "" {
-									v = strings.TrimSpace(v)
-									if v != "" {
-										metadata.Version = v
-									}
+							if v, ok := licenseData["version"].(string); ok && metadata.Version == "" {
+								v = strings.TrimSpace(v)
+								if v != "" {
+									metadata.Version = v
 								}
-								if d, ok := licenseData["dashboard_url"].(string); ok && metadata.DashboardURL == "" {
-									if d = strings.TrimSpace(d); d != "" {
-										metadata.DashboardURL = d
-									}
+							}
+							if d, ok := licenseData["dashboard_url"].(string); ok && metadata.DashboardURL == "" {
+								if d = strings.TrimSpace(d); d != "" {
+									metadata.DashboardURL = d
 								}
+							}
 							if d, ok := licenseData["deployment_id"].(string); ok && metadata.DeploymentID == "" {
 								metadata.DeploymentID = d
 							}
@@ -2984,6 +3076,24 @@ func readZipFile(f *zip.File) ([]byte, error) {
 	return io.ReadAll(rc)
 }
 
+func readZipFileLimited(f *zip.File, limit int64) ([]byte, bool, error) {
+	rc, err := f.Open()
+	if err != nil {
+		return nil, false, err
+	}
+	defer rc.Close()
+
+	content, err := io.ReadAll(io.LimitReader(rc, limit+1))
+	if err != nil {
+		return nil, false, err
+	}
+	truncated := int64(len(content)) > limit
+	if truncated {
+		content = content[:limit]
+	}
+	return content, truncated, nil
+}
+
 func findSibling(zr *zip.Reader, name string) *zip.File {
 	for _, f := range zr.File {
 		if f.Name == name {
@@ -3673,6 +3783,16 @@ func serveJS(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(appJS)
 }
 
+func serveLogsHTML(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(logsHTML)
+}
+
+func serveLogsJS(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	_, _ = w.Write(logsJS)
+}
+
 func serveCSS(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/css; charset=utf-8")
 	_, _ = w.Write(styleCSS)
@@ -3732,6 +3852,29 @@ func handleGetBundle(s *Store) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, b)
+	}
+}
+
+func handleBundleAgentLogs(s *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := mux.Vars(r)["id"]
+		b, ok := s.GetBundle(id)
+		if !ok {
+			http.Error(w, "bundle not found", http.StatusNotFound)
+			return
+		}
+		if b.AgentLog == nil {
+			http.Error(w, "agent logs not found", http.StatusNotFound)
+			return
+		}
+		writeJSON(w, map[string]any{
+			"path":       b.AgentLog.Path,
+			"size":       b.AgentLog.Size,
+			"lines":      b.AgentLog.Lines,
+			"truncated":  b.AgentLog.Truncated,
+			"limitBytes": maxAgentLogBytes,
+			"html":       b.AgentLog.HighlightedHTML,
+		})
 	}
 }
 
@@ -4097,6 +4240,10 @@ var (
 	appJS []byte
 	//go:embed web/style.css
 	styleCSS []byte
+	//go:embed web/logs.html
+	logsHTML []byte
+	//go:embed web/logs.js
+	logsJS []byte
 	//go:embed web/dashboards/*.json
 	grafanaDashboardsFS embed.FS
 )
@@ -4222,12 +4369,15 @@ func main() {
 	// Static files
 	r.HandleFunc("/", serveIndex)
 	r.HandleFunc("/app.js", serveJS)
+	r.HandleFunc("/logs", serveLogsHTML)
+	r.HandleFunc("/logs.js", serveLogsJS)
 	r.HandleFunc("/style.css", serveCSS)
 
 	// API endpoints
 	r.HandleFunc("/api/bundles", withMetrics("list_bundles", handleListBundles(store))).Methods("GET")
 	r.HandleFunc("/api/bundles", withMetrics("upload_bundle", handleUploadBundle(store))).Methods("POST")
 	r.HandleFunc("/api/bundles/{id}", withMetrics("get_bundle", handleGetBundle(store))).Methods("GET")
+	r.HandleFunc("/api/bundles/{id}/logs/agent", withMetrics("bundle_agent_logs", handleBundleAgentLogs(store))).Methods("GET")
 	r.HandleFunc("/api/bundles/{id}/prometheus", withMetrics("prometheus_status", handlePrometheusStatus(store))).Methods("GET")
 	r.HandleFunc("/api/bundles/{id}/prometheus/start", withMetrics("prometheus_start", handlePrometheusStart(store))).Methods("POST")
 	r.HandleFunc("/api/bundles/{id}/prometheus/stop", withMetrics("prometheus_stop", handlePrometheusStop(store))).Methods("POST")

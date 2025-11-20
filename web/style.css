@@ -5,6 +5,7 @@
   --muted:#9aa4b2;
   --accent:#6ea8fe;
   --accent2:#7ee787;
+  --logs:#d37bff;
   --danger:#ef4444;
   --warning:#f59e0b;
   --success:#10b981;
@@ -27,10 +28,14 @@ h1{ font-size: 22px; margin:0 0 4px 0;}
   display: flex;
   gap: 12px;
 }
+.header-actions a{
+  text-decoration: none;
+}
 .upload-btn,
 .timeseries-btn,
 .prometheus-btn,
-.grafana-btn{
+.grafana-btn,
+.logs-btn{
   background: var(--accent2);
   color: #020409;
   border: 0;
@@ -47,6 +52,9 @@ h1{ font-size: 22px; margin:0 0 4px 0;}
 .prometheus-btn{
   background: var(--accent);
 }
+.logs-btn{
+  background: var(--logs);
+}
 .grafana-btn{
   background: #f05a28;
   color: #020409;
@@ -54,7 +62,8 @@ h1{ font-size: 22px; margin:0 0 4px 0;}
 .upload-btn:hover,
 .timeseries-btn:hover,
 .prometheus-btn:hover,
-.grafana-btn:hover{ 
+.grafana-btn:hover,
+.logs-btn:hover{ 
   filter: brightness(1.1);
 }
 .upload-btn:disabled{
@@ -146,6 +155,101 @@ h1{ font-size: 22px; margin:0 0 4px 0;}
 }
 .metadata-value a:hover{
   text-decoration: underline;
+}
+
+.logs-info{
+  font-size: 13px;
+  color: var(--muted);
+}
+.load-logs-btn{
+  background: var(--accent);
+  color: #020409;
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.load-logs-btn:hover{
+  filter: brightness(1.1);
+}
+.load-logs-btn:disabled{
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.logs-body{
+  margin-top: 12px;
+  background: #0c101b;
+  border: 1px solid #1c2130;
+  border-radius: 10px;
+  padding: 16px;
+  max-height: calc(100vh - 200px);
+  min-height: 70vh;
+  overflow: auto;
+  width: 100%;
+}
+.logs-scroll{
+  overflow: auto;
+}
+.logs-body pre{
+  margin: 0;
+  background: #0b0d12;
+  color: #e6ecf8;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.logs-body .chroma{
+  background: #0b0d12 !important;
+  color: #e6ecf8 !important;
+}
+.logs-body .chroma table{
+  border-spacing: 0;
+  width: 100%;
+}
+.logs-body .chroma .lntd{
+  padding-right: 12px;
+  color: #8290ad;
+  user-select: none;
+}
+.logs-body .chroma .code{
+  width: 100%;
+}
+.logs-footnote{
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.logs-page{
+  width: 100%;
+  max-width: none;
+}
+.logs-page-shell{
+  margin-top: 8px;
+  width: 100%;
+}
+.logs-page-header{
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.logs-page-header h1{
+  margin: 0;
+  color: var(--accent);
+}
+.logs-page-path{
+  color: var(--muted);
+  font-size: 13px;
+  margin-top: 2px;
+  word-break: break-all;
+}
+.logs-page-actions{
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 /* Network Panel */

@@ -4,11 +4,17 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/pprof/profile"
+	"github.com/gorilla/mux"
 )
 
 func buildTestZip(t *testing.T, files map[string][]byte) (*bytes.Reader, int64) {
@@ -137,6 +143,94 @@ func TestLoadBundle_WithProfiles(t *testing.T) {
 		if strings.Contains(w, "No pprof profiles") {
 			t.Fatalf("did not expect missing pprof warning when profiles are present")
 		}
+	}
+}
+
+func TestLoadBundle_AgentLogs(t *testing.T) {
+	logContent := "2025-01-02T03:04:05Z [info] hello world\nsecond line"
+	reader, size := buildTestZip(t, map[string][]byte{
+		agentLogPath: []byte(logContent),
+	})
+
+	result := loadBundleFromZip(reader, size, "bundle.zip")
+	if result.Error != nil {
+		t.Fatalf("unexpected error: %v", result.Error)
+	}
+	if result.Bundle.AgentLog == nil {
+		t.Fatalf("expected agent log to be parsed")
+	}
+	if result.Bundle.AgentLog.Truncated {
+		t.Fatalf("did not expect agent log to be truncated")
+	}
+	if result.Bundle.AgentLog.Lines != 2 {
+		t.Fatalf("expected 2 log lines, got %d", result.Bundle.AgentLog.Lines)
+	}
+	if !strings.Contains(result.Bundle.AgentLog.HighlightedHTML, "second line") {
+		t.Fatalf("expected highlighted HTML to contain log content")
+	}
+}
+
+func TestLoadBundle_AgentLogs_Truncated(t *testing.T) {
+	content := bytes.Repeat([]byte("0123456789\n"), int(maxAgentLogBytes/11)+50)
+	reader, size := buildTestZip(t, map[string][]byte{
+		agentLogPath: content,
+	})
+
+	result := loadBundleFromZip(reader, size, "bundle.zip")
+	if result.Error != nil {
+		t.Fatalf("unexpected error: %v", result.Error)
+	}
+	if result.Bundle.AgentLog == nil {
+		t.Fatalf("expected agent log to be parsed")
+	}
+	if !result.Bundle.AgentLog.Truncated {
+		t.Fatalf("expected agent log to be marked truncated")
+	}
+	if result.Bundle.AgentLog.HighlightedHTML == "" {
+		t.Fatalf("expected highlighted HTML to be present")
+	}
+}
+
+func TestHandleBundleAgentLogs(t *testing.T) {
+	store := NewStore(slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{})))
+	bundle := &Bundle{
+		ID:      "bundle-logs",
+		Name:    "bundle.zip",
+		Created: time.Now(),
+		AgentLog: &BundleLog{
+			Path:            agentLogPath,
+			Size:            int64(len("ok")),
+			Lines:           1,
+			HighlightedHTML: "<pre>ok</pre>",
+		},
+	}
+	store.AddBundle(bundle)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/bundles/"+bundle.ID+"/logs/agent", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": bundle.ID})
+	rr := httptest.NewRecorder()
+
+	handleBundleAgentLogs(store)(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d", rr.Code)
+	}
+	var resp struct {
+		HTML  string `json:"html"`
+		Path  string `json:"path"`
+		Lines int    `json:"lines"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.HTML != bundle.AgentLog.HighlightedHTML {
+		t.Fatalf("expected html %q, got %q", bundle.AgentLog.HighlightedHTML, resp.HTML)
+	}
+	if resp.Path != bundle.AgentLog.Path {
+		t.Fatalf("expected path %q, got %q", bundle.AgentLog.Path, resp.Path)
+	}
+	if resp.Lines != bundle.AgentLog.Lines {
+		t.Fatalf("expected lines %d, got %d", bundle.AgentLog.Lines, resp.Lines)
 	}
 }
 
