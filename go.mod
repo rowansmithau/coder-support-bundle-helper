@@ -1,4 +1,4 @@
-module github.com/coder/coder-support-bundle-viewer
+module github.com/rowansmithau/coder-support-bundle-helper
 
 go 1.25.4
 

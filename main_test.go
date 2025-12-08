@@ -9,13 +9,23 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/rowansmithau/coder-support-bundle-helper/internal/handlers"
+	"github.com/rowansmithau/coder-support-bundle-helper/internal/metrics"
+	"github.com/rowansmithau/coder-support-bundle-helper/internal/parser"
+	"github.com/rowansmithau/coder-support-bundle-helper/internal/store"
 	"github.com/google/pprof/profile"
 	"github.com/gorilla/mux"
 )
+
+func TestMain(m *testing.M) {
+	appMetrics = metrics.New()
+	os.Exit(m.Run())
+}
 
 func buildTestZip(t *testing.T, files map[string][]byte) (*bytes.Reader, int64) {
 	t.Helper()
@@ -68,7 +78,7 @@ func TestLoadBundle_ValidLicense(t *testing.T) {
 		"license-status.txt": license,
 	})
 
-	result := loadBundleFromZip(reader, size, "bundle.zip")
+	result := parser.LoadBundleFromZip(reader, size, "bundle.zip", nil)
 	if result.Error != nil {
 		t.Fatalf("unexpected error: %v", result.Error)
 	}
@@ -89,7 +99,7 @@ func TestLoadBundle_BuildInfoMatch(t *testing.T) {
 		"network/tailnet_debug.html": tailnet,
 	})
 
-	result := loadBundleFromZip(reader, size, "bundle.zip")
+	result := parser.LoadBundleFromZip(reader, size, "bundle.zip", nil)
 	if result.Error != nil {
 		t.Fatalf("unexpected error: %v", result.Error)
 	}
@@ -107,7 +117,7 @@ func TestLoadBundle_NoProfiles(t *testing.T) {
 		"license-status.txt": []byte(`{"external_url":"https://example.com"}`),
 	})
 
-	result := loadBundleFromZip(reader, size, "bundle.zip")
+	result := parser.LoadBundleFromZip(reader, size, "bundle.zip", nil)
 	if result.Error != nil {
 		t.Fatalf("unexpected error: %v", result.Error)
 	}
@@ -132,7 +142,7 @@ func TestLoadBundle_WithProfiles(t *testing.T) {
 		"pprof/cpu.pprof": profileData,
 	})
 
-	result := loadBundleFromZip(reader, size, "bundle.zip")
+	result := parser.LoadBundleFromZip(reader, size, "bundle.zip", nil)
 	if result.Error != nil {
 		t.Fatalf("unexpected error: %v", result.Error)
 	}
@@ -152,7 +162,7 @@ func TestLoadBundle_AgentLogs(t *testing.T) {
 		agentLogPath: []byte(logContent),
 	})
 
-	result := loadBundleFromZip(reader, size, "bundle.zip")
+	result := parser.LoadBundleFromZip(reader, size, "bundle.zip", nil)
 	if result.Error != nil {
 		t.Fatalf("unexpected error: %v", result.Error)
 	}
@@ -176,7 +186,7 @@ func TestLoadBundle_AgentLogs_Truncated(t *testing.T) {
 		agentLogPath: content,
 	})
 
-	result := loadBundleFromZip(reader, size, "bundle.zip")
+	result := parser.LoadBundleFromZip(reader, size, "bundle.zip", nil)
 	if result.Error != nil {
 		t.Fatalf("unexpected error: %v", result.Error)
 	}
@@ -192,7 +202,7 @@ func TestLoadBundle_AgentLogs_Truncated(t *testing.T) {
 }
 
 func TestHandleBundleAgentLogs(t *testing.T) {
-	store := NewStore(slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{})))
+	st := store.New(slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{})), nil)
 	bundle := &Bundle{
 		ID:      "bundle-logs",
 		Name:    "bundle.zip",
@@ -204,13 +214,13 @@ func TestHandleBundleAgentLogs(t *testing.T) {
 			HighlightedHTML: "<pre>ok</pre>",
 		},
 	}
-	store.AddBundle(bundle)
+	st.AddBundle(bundle)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/bundles/"+bundle.ID+"/logs/agent", nil)
 	req = mux.SetURLVars(req, map[string]string{"id": bundle.ID})
 	rr := httptest.NewRecorder()
 
-	handleBundleAgentLogs(store)(rr, req)
+	handlers.BundleAgentLogs(st, maxAgentLogBytes)(rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("unexpected status: %d", rr.Code)
@@ -241,7 +251,7 @@ func TestLoadBundle_CapturedTimeFromCLI(t *testing.T) {
 		"cli_logs.txt": []byte(logs),
 	})
 
-	result := loadBundleFromZip(reader, size, "bundle.zip")
+	result := parser.LoadBundleFromZip(reader, size, "bundle.zip", nil)
 	if result.Error != nil {
 		t.Fatalf("unexpected error: %v", result.Error)
 	}

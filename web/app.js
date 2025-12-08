@@ -456,7 +456,13 @@ function renderNetworkPanel(network) {
     }
     if (Array.isArray(network.warnings)) {
       network.warnings.forEach(msg => {
-        const value = String(msg || '').trim();
+        let value;
+        if (msg && typeof msg === 'object') {
+          // Handle {code, message} format
+          value = msg.code ? `${msg.code}: ${msg.message || ''}` : (msg.message || '');
+        } else {
+          value = String(msg || '').trim();
+        }
         if (value) alerts.push({ type: 'warning', text: value });
       });
     }
