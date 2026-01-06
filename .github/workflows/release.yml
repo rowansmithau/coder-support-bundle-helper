@@ -1,0 +1,122 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and Release
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Get version from tag
+        id: get_version
+        run: |
+          echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          echo "VERSION_SHORT=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Build binaries
+        run: |
+          mkdir -p dist
+          
+          # Build linux/amd64
+          echo "Building linux/amd64..."
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build \
+            -ldflags="-s -w -X 'main.Version=${{ steps.get_version.outputs.VERSION }}'" \
+            -o dist/coder-support-bundle-helper-${{ steps.get_version.outputs.VERSION }}-linux-amd64 \
+            .
+          
+          # Build darwin/arm64 (macOS Apple Silicon)
+          echo "Building darwin/arm64..."
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build \
+            -ldflags="-s -w -X 'main.Version=${{ steps.get_version.outputs.VERSION }}'" \
+            -o dist/coder-support-bundle-helper-${{ steps.get_version.outputs.VERSION }}-darwin-arm64 \
+            .
+          
+          # Build windows/amd64
+          echo "Building windows/amd64..."
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build \
+            -ldflags="-s -w -X 'main.Version=${{ steps.get_version.outputs.VERSION }}'" \
+            -o dist/coder-support-bundle-helper-${{ steps.get_version.outputs.VERSION }}-windows-amd64.exe \
+            .
+
+      - name: Create archives
+        run: |
+          cd dist
+          
+          # Create tar.gz archives for Linux and macOS
+          for binary in coder-support-bundle-helper-*-linux-* coder-support-bundle-helper-*-darwin-*; do
+            if [ -f "$binary" ]; then
+              tar czf "${binary}.tar.gz" "$binary"
+              echo "Created ${binary}.tar.gz"
+            fi
+          done
+          
+          # Create zip archive for Windows
+          for binary in coder-support-bundle-helper-*-windows-*.exe; do
+            if [ -f "$binary" ]; then
+              zip "${binary%.exe}.zip" "$binary"
+              echo "Created ${binary%.exe}.zip"
+            fi
+          done
+          
+          # Generate SHA256 checksums
+          sha256sum coder-support-bundle-helper-* > SHA256SUMS
+          
+          ls -la
+
+      - name: Generate release notes
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          
+          cat > dist/RELEASE_NOTES.md << EOF
+          ## Coder Support Bundle Helper ${{ steps.get_version.outputs.VERSION }}
+          
+          ### Downloads
+          
+          | Platform | Architecture | File |
+          |----------|-------------|------|
+          | Linux | amd64 | \`coder-support-bundle-helper-${{ steps.get_version.outputs.VERSION }}-linux-amd64.tar.gz\` |
+          | macOS | arm64 (Apple Silicon) | \`coder-support-bundle-helper-${{ steps.get_version.outputs.VERSION }}-darwin-arm64.tar.gz\` |
+          | Windows | amd64 | \`coder-support-bundle-helper-${{ steps.get_version.outputs.VERSION }}-windows-amd64.zip\` |
+          
+          ### Changes
+          
+          EOF
+          
+          if [ -z "$PREV_TAG" ]; then
+            echo "Initial release" >> dist/RELEASE_NOTES.md
+          else
+            git log --pretty=format:"- %s" $PREV_TAG..HEAD | head -20 >> dist/RELEASE_NOTES.md
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create ${{ steps.get_version.outputs.VERSION }} \
+            --title "Release ${{ steps.get_version.outputs.VERSION }}" \
+            --notes-file dist/RELEASE_NOTES.md \
+            dist/coder-support-bundle-helper-${{ steps.get_version.outputs.VERSION }}-linux-amd64 \
+            dist/coder-support-bundle-helper-${{ steps.get_version.outputs.VERSION }}-linux-amd64.tar.gz \
+            dist/coder-support-bundle-helper-${{ steps.get_version.outputs.VERSION }}-darwin-arm64 \
+            dist/coder-support-bundle-helper-${{ steps.get_version.outputs.VERSION }}-darwin-arm64.tar.gz \
+            dist/coder-support-bundle-helper-${{ steps.get_version.outputs.VERSION }}-windows-amd64.exe \
+            dist/coder-support-bundle-helper-${{ steps.get_version.outputs.VERSION }}-windows-amd64.zip \
+            dist/SHA256SUMS
