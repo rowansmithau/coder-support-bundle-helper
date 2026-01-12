@@ -1,4 +1,4 @@
-# Coder Support Bundle Viewer
+# Coder Support Bundle Helper
 
 A small web app that ingests a Coder support bundle `.zip` (or a raw `.pprof`/`.prof.gz`) and presents the contained data:
 
@@ -17,15 +17,30 @@ A small web app that ingests a Coder support bundle `.zip` (or a raw `.pprof`/`.
 - Automatically spins up Prometheus backed by the bundle snapshots and Grafana preloaded with the upstream Coder dashboards
 - Prometheus/Grafana buttons deep-link to the relevant time range for the snapshots (no manual range tweaking required)
 - Prometheus samples are tagged with `bundle_id`, `snapshot_source`, and `snapshot_name` so deployment vs. agent data is easy to differentiate
+- Provides a view of the Agent's logs
 
 ## Requirements
 
-- `graphviz` installed (e.g. `brew install graphviz`)
-- `prometheus` binary on `PATH` (e.g. `brew install prometheus`)
-- `grafana` binary on `PATH` (e.g. `brew install grafana`)
+- `graphviz`
+- `prometheus`
+- `grafana`
+
+One liner:
 - `brew install graphviz prometheus grafana`
 
 ## Run
+
+### Prebuilt Binary from Releases page
+
+```bash
+curl -LO https://github.com/rowansmithau/coder-support-bundle-helper/releases/download/v0.0.1/coder-support-bundle-helper-v0.0.1-darwin-arm64
+xattr -dr com.apple.quarantine ./coder-support-bundle-helper-v0.0.1-darwin-arm64
+chmod +x coder-support-bundle-helper-v0.0.1-darwin-arm64
+sudo mv coder-support-bundle-helper-v0.0.1-darwin-arm64 /usr/local/bin/csbh
+csbh -bundle support-bundle.zip
+```
+
+Then open http://127.0.0.1:6969 in your browser.
 
 ### With Go
 
